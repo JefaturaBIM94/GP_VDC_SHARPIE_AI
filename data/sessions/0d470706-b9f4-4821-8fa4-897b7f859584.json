@@ -1,0 +1,15 @@
+{
+  "session_id": "0d470706-b9f4-4821-8fa4-897b7f859584",
+  "image_filename": "data\\images\\test_image.jpeg",
+  "created_at": "2025-12-11T20:18:15.448213",
+  "segments": [
+    {
+      "class_name": "columns",
+      "threshold": 0.5,
+      "num_objects": 22
+    }
+  ],
+  "classes_counts": {
+    "columns": 22
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "session_id": "7ad601ea-0eae-470b-a676-410572b2e877",
+  "image_filename": "wall-floor-column.jpeg",
+  "created_at": "2025-12-12T00:11:00.660143",
+  "segments": [
+    {
+      "class_name": "beams",
+      "threshold": 0.5,
+      "num_objects": 5
+    }
+  ],
+  "classes_counts": {
+    "beams": 5
+  }
+}

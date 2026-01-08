@@ -1,0 +1,15 @@
+{
+  "session_id": "70611d48-e6ce-44e7-881f-330b347688a0",
+  "image_filename": "wall-floor-column.jpeg",
+  "created_at": "2025-12-15T18:50:54.953065",
+  "segments": [
+    {
+      "class_name": "floors",
+      "threshold": 0.5,
+      "num_objects": 1
+    }
+  ],
+  "classes_counts": {
+    "floors": 1
+  }
+}

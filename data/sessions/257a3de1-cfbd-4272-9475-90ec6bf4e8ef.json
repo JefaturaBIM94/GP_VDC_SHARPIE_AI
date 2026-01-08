@@ -1,0 +1,15 @@
+{
+  "session_id": "257a3de1-cfbd-4272-9475-90ec6bf4e8ef",
+  "image_filename": "wall-floor-column.jpeg",
+  "created_at": "2025-12-15T19:08:07.344938",
+  "segments": [
+    {
+      "class_name": "steel diagonal girders",
+      "threshold": 0.5,
+      "num_objects": 1
+    }
+  ],
+  "classes_counts": {
+    "steel diagonal girders": 1
+  }
+}

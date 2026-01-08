@@ -1,0 +1,15 @@
+{
+  "session_id": "f3050692-822f-4994-9aff-86ec41b75ced",
+  "image_filename": "wall-floor-column.jpeg",
+  "created_at": "2025-12-15T18:52:07.072510",
+  "segments": [
+    {
+      "class_name": "STEEL HORIZONTAL STRUCTURE BEAMS",
+      "threshold": 0.5,
+      "num_objects": 9
+    }
+  ],
+  "classes_counts": {
+    "STEEL HORIZONTAL STRUCTURE BEAMS": 9
+  }
+}
