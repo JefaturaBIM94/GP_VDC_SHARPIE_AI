@@ -1,9 +1,19 @@
+// frontend/src/App.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
-import { segmentImage, type SegmentResponse, type InstanceLabel } from "./api";
+import {
+  segmentImage,
+  ocrBatch,
+  type SegmentResponse,
+  type InstanceLabel,
+  type OcrBatchResponse,
+  type OcrItem,
+  type OcrDetection,
+} from "./api";
 
 type CountMode = "simple" | "multi";
 type ChartType = "donut" | "pie" | "bubble";
+type ToolMode = "sam3" | "ocr";
 
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
@@ -12,18 +22,29 @@ function formatClassName(s: string) {
   return (s ?? "").trim().toLowerCase() || "--";
 }
 
+/** Hook para URL.createObjectURL con cleanup (evita leaks) */
+function useObjectUrl(file: File | null) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!file) {
+      setUrl(null);
+      return;
+    }
+    const u = URL.createObjectURL(file);
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [file]);
+
+  return url;
+}
+
 /** ======= SVG CHARTS (sin dependencias) ======= */
 function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
   const rad = ((angleDeg - 90) * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
-function describeArc(
-  cx: number,
-  cy: number,
-  r: number,
-  startAngle: number,
-  endAngle: number
-) {
+function describeArc(cx: number, cy: number, r: number, startAngle: number, endAngle: number) {
   const start = polarToCartesian(cx, cy, r, endAngle);
   const end = polarToCartesian(cx, cy, r, startAngle);
   const largeArcFlag = endAngle - startAngle <= 180 ? "0" : "1";
@@ -94,9 +115,7 @@ function PieDonutChart({
             strokeWidth={1}
           />
         ))}
-        {type === "donut" && (
-          <circle cx={cx} cy={cy} r={innerR} fill="rgba(2,6,23,0.85)" />
-        )}
+        {type === "donut" && <circle cx={cx} cy={cy} r={innerR} fill="rgba(2,6,23,0.85)" />}
 
         <text
           x={cx}
@@ -167,13 +186,7 @@ function BubbleChart({
               >
                 {d.count}
               </text>
-              <text
-                x={cx}
-                y={cy + r + 16}
-                textAnchor="middle"
-                fill="rgba(148,163,184,0.95)"
-                fontSize={10}
-              >
+              <text x={cx} y={cy + r + 16} textAnchor="middle" fill="rgba(148,163,184,0.95)" fontSize={10}>
                 {d.className.length > 10 ? d.className.slice(0, 10) + "…" : d.className}
               </text>
             </g>
@@ -184,17 +197,11 @@ function BubbleChart({
   );
 }
 
-/** ======= Hover Highlight helpers =======
- * Usamos id_map (PNG grayscale) para:
- * - Determinar hoveredId por píxel
- * - Precalcular contornos (edges) por id
- * - Dibujar outline/glow en un canvas TRANSPARENTE
- */
-type EdgeMap = Map<number, Uint32Array>; // cada edge = [x,y,x,y,...] packed (x<<16|y) o viceversa
+/** ======= Hover Highlight helpers (SAM3) ======= */
+type EdgeMap = Map<number, Uint32Array>;
 
 function computeEdgesFromIdMap(idMap: Uint8ClampedArray, w: number, h: number): EdgeMap {
   const edgesById = new Map<number, number[]>();
-
   const idx = (x: number, y: number) => y * w + x;
 
   for (let y = 1; y < h - 1; y++) {
@@ -202,7 +209,6 @@ function computeEdgesFromIdMap(idMap: Uint8ClampedArray, w: number, h: number): 
       const id = idMap[idx(x, y)];
       if (id === 0) continue;
 
-      // edge si algún vecino != id
       const n1 = idMap[idx(x - 1, y)];
       const n2 = idMap[idx(x + 1, y)];
       const n3 = idMap[idx(x, y - 1)];
@@ -215,9 +221,7 @@ function computeEdgesFromIdMap(idMap: Uint8ClampedArray, w: number, h: number): 
   }
 
   const out: EdgeMap = new Map();
-  for (const [id, arr] of edgesById.entries()) {
-    out.set(id, new Uint32Array(arr));
-  }
+  for (const [id, arr] of edgesById.entries()) out.set(id, new Uint32Array(arr));
   return out;
 }
 
@@ -230,21 +234,17 @@ function drawEdges(
 ) {
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-  // Glow + outline (2 pasadas)
   ctx.save();
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
 
-  // Pass 1: glow suave
   ctx.globalAlpha = 0.85;
   ctx.shadowColor = color;
   ctx.shadowBlur = 18;
-  ctx.fillStyle = "rgba(255,255,255,0.0)"; // no fill real, pintamos “puntos”
+  ctx.fillStyle = "rgba(255,255,255,0.0)";
   ctx.strokeStyle = color;
   ctx.lineWidth = 3;
 
-  // Dibujo por puntos (rápido y suficientemente “Meta-like” para POC)
-  // Pintamos rects de 1px escalados -> se ve como borde
   for (let i = 0; i < edges.length; i++) {
     const packed = edges[i];
     const x = (packed >>> 16) & 0xffff;
@@ -254,7 +254,6 @@ function drawEdges(
     ctx.fillRect(dx, dy, Math.max(1, scaleX), Math.max(1, scaleY));
   }
 
-  // Pass 2: outline más definido
   ctx.shadowBlur = 0;
   ctx.globalAlpha = 0.95;
   ctx.fillStyle = "rgba(255,255,255,0.0)";
@@ -272,6 +271,10 @@ function drawEdges(
 
 /** ======= MAIN APP ======= */
 export default function App() {
+  // Tool selector
+  const [toolMode, setToolMode] = useState<ToolMode>("sam3");
+
+  // SAM3 state
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState("columns");
   const [threshold, setThreshold] = useState(0.5);
@@ -285,10 +288,15 @@ export default function App() {
   const [lastResult, setLastResult] = useState<SegmentResponse | null>(null);
   const [history, setHistory] = useState<SegmentResponse[]>([]);
 
-  // Hover state
+  // OCR state
+  const [ocrFiles, setOcrFiles] = useState<File[]>([]);
+  const [ocrResult, setOcrResult] = useState<OcrBatchResponse | null>(null);
+  const [ocrSelectedIdx, setOcrSelectedIdx] = useState<number>(0);
+
+  // Hover state (SAM3)
   const [hoverId, setHoverId] = useState<number>(0);
 
-  // Refs para canvas hover
+  // Refs para canvas hover (SAM3)
   const overlayImgRef = useRef<HTMLImageElement | null>(null);
   const hoverCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -300,13 +308,10 @@ export default function App() {
 
   const labels: InstanceLabel[] = lastResult?.labels ?? [];
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0] ?? null;
-    setFile(f);
+  const resetSam3 = () => {
+    setFile(null);
     setLastResult(null);
     setHistory([]);
-    setError(null);
-
     setHoverId(0);
     setIdMapData(null);
     setIdMapW(0);
@@ -314,10 +319,66 @@ export default function App() {
     setEdgeMap(null);
   };
 
+  const resetOcr = () => {
+    setOcrFiles([]);
+    setOcrResult(null);
+    setOcrSelectedIdx(0);
+  };
+
+  const onToolModeChange = (m: ToolMode) => {
+    setToolMode(m);
+    setError(null);
+    setLoading(false);
+
+    if (m === "sam3") resetOcr();
+    else resetSam3();
+  };
+
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+
+    if (toolMode === "sam3") {
+      const f = e.target.files?.[0] ?? null;
+      setFile(f);
+      setLastResult(null);
+      setHistory([]);
+
+      setHoverId(0);
+      setIdMapData(null);
+      setIdMapW(0);
+      setIdMapH(0);
+      setEdgeMap(null);
+    } else {
+      const files = Array.from(e.target.files ?? []);
+      const limited = files.slice(0, 10);
+      setOcrFiles(limited);
+      setOcrResult(null);
+      setOcrSelectedIdx(0);
+    }
+  };
+
+  // Guard rail: si cambia el arreglo, asegurar índice válido
+  useEffect(() => {
+    if (toolMode !== "ocr") return;
+    if (ocrFiles.length === 0) {
+      setOcrSelectedIdx(0);
+      return;
+    }
+    if (ocrSelectedIdx > ocrFiles.length - 1) {
+      setOcrSelectedIdx(0);
+    }
+  }, [ocrFiles, ocrSelectedIdx, toolMode]);
+
+  useEffect(() => {
+    if (toolMode !== "ocr") return;
+    if (!ocrResult?.items?.length) return;
+    if (ocrSelectedIdx > ocrResult.items.length - 1) setOcrSelectedIdx(0);
+  }, [ocrResult, ocrSelectedIdx, toolMode]);
+
   const onModeChange = (m: CountMode) => {
     setMode(m);
     setHistory([]);
-    if (lastResult && lastResult.num_objects > 0) setHistory([lastResult]);
+    if (lastResult && (lastResult.labels?.length ?? 0) > 0) setHistory([lastResult]);
   };
 
   const handleSubmit = async () => {
@@ -334,7 +395,7 @@ export default function App() {
       const data = await segmentImage(file, prompt, threshold);
       setLastResult(data);
 
-      if (data.num_objects > 0) {
+      if ((data.labels?.length ?? 0) > 0) {
         setHistory((prev) => (mode === "simple" ? [data] : [...prev, data]));
       }
     } catch (err) {
@@ -345,25 +406,88 @@ export default function App() {
     }
   };
 
-  const originalSrc = useMemo(() => {
-    if (!file) return null;
-    return URL.createObjectURL(file);
-  }, [file]);
+  const handleOcr = async () => {
+    if (ocrFiles.length === 0) {
+      setError("Primero sube 1 a 10 imágenes para OCR.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      const data = await ocrBatch(ocrFiles);
+      setOcrResult(data);
+      setOcrSelectedIdx(0);
+    } catch (err) {
+      console.error(err);
+      setError("Error llamando OCR al backend. Verifica el endpoint /api/ocr-batch.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Descarga CSV (POC)
+  const downloadOcrCsv = () => {
+    if (!ocrResult) return;
+
+    const rows: string[] = [];
+    rows.push(["filename", "codes"].join(","));
+
+    for (const item of ocrResult.items) {
+      const codes = (item.codes ?? []).join(" | ");
+      const safeFilename = `"${(item.filename ?? "").replace(/"/g, '""')}"`;
+      const safeCodes = `"${codes.replace(/"/g, '""')}"`;
+      rows.push([safeFilename, safeCodes].join(","));
+    }
+
+    rows.push("");
+    rows.push("unique_codes");
+    for (const c of ocrResult.unique_codes ?? []) {
+      rows.push(`"${String(c).replace(/"/g, '""')}"`);
+    }
+
+    const csv = rows.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "ocr_concentrado.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ===== Preview imagen original =====
+  const ocrSelectedFile: File | null = useMemo(() => {
+    if (toolMode !== "ocr") return null;
+    if (!ocrFiles.length) return null;
+    const idx = Math.min(Math.max(0, ocrSelectedIdx), ocrFiles.length - 1);
+    return ocrFiles[idx] ?? null;
+  }, [toolMode, ocrFiles, ocrSelectedIdx]);
+
+  const sam3OriginalSrc = useObjectUrl(toolMode === "sam3" ? file : null);
+  const ocrOriginalSrc = useObjectUrl(toolMode === "ocr" ? ocrSelectedFile : null);
+  const originalSrc = toolMode === "sam3" ? sam3OriginalSrc : ocrOriginalSrc;
 
   const overlaySrc = lastResult?.overlay_image_b64
     ? `data:image/png;base64,${lastResult.overlay_image_b64}`
     : null;
 
-  const idMapSrc = lastResult?.id_map_b64
-    ? `data:image/png;base64,${lastResult.id_map_b64}`
-    : null;
+  const idMapSrc = lastResult?.id_map_b64 ? `data:image/png;base64,${lastResult.id_map_b64}` : null;
 
+  // ✅ FIX: ya no usamos class_name/num_objects; usamos classes_counts agregadas en history
   const aggregatedCounts = useMemo(() => {
     const counts = new Map<string, number>();
+
     for (const r of history) {
-      const key = formatClassName(r.class_name);
-      counts.set(key, (counts.get(key) ?? 0) + (r.num_objects ?? 0));
+      const cc = r.classes_counts ?? {};
+      for (const [cls, n] of Object.entries(cc)) {
+        const key = formatClassName(cls);
+        counts.set(key, (counts.get(key) ?? 0) + (n ?? 0));
+      }
     }
+
     return Array.from(counts.entries())
       .map(([className, count]) => ({ className, count }))
       .sort((a, b) => b.count - a.count);
@@ -372,7 +496,6 @@ export default function App() {
   const totalObjects = aggregatedCounts.reduce((acc, row) => acc + row.count, 0);
   const maxCount = aggregatedCounts.reduce((acc, row) => Math.max(acc, row.count), 0);
 
-  // Map id -> label color (para outline)
   const colorById = useMemo(() => {
     const m = new Map<number, string>();
     for (const l of labels) m.set(l.id, l.color);
@@ -406,17 +529,15 @@ export default function App() {
       ctx.drawImage(img, 0, 0);
       const imageData = ctx.getImageData(0, 0, w, h).data;
 
-      // grayscale PNG: R=G=B=id
       const ids = new Uint8ClampedArray(w * h);
       for (let i = 0, p = 0; i < imageData.length; i += 4, p++) {
-        ids[p] = imageData[i]; // canal R
+        ids[p] = imageData[i];
       }
 
       setIdMapData(ids);
       setIdMapW(w);
       setIdMapH(h);
 
-      // precalc edges por id (una sola vez por segmentación)
       const edges = computeEdgesFromIdMap(ids, w, h);
       setEdgeMap(edges);
     };
@@ -427,7 +548,6 @@ export default function App() {
     };
   }, [idMapSrc]);
 
-  /** Ajustar el canvas hover a las dimensiones RENDER del <img> (no natural) */
   const syncHoverCanvasToImage = () => {
     const imgEl = overlayImgRef.current;
     const canvas = hoverCanvasRef.current;
@@ -452,7 +572,6 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  /** Cuando cambia hoverId, dibuja outline en canvas */
   useEffect(() => {
     const canvas = hoverCanvasRef.current;
     const imgEl = overlayImgRef.current;
@@ -479,34 +598,21 @@ export default function App() {
     drawEdges(ctx, edges, color, scaleX, scaleY);
   }, [hoverId, edgeMap, idMapW, idMapH, colorById]);
 
-  /** Mouse move: samplea id_map por pixel para determinar hoverId */
-  const onOverlayMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!idMapData || !overlayImgRef.current || !idMapW || !idMapH) return;
+  const onOverlayMouseLeave = () => setHoverId(0);
 
-    const imgEl = overlayImgRef.current;
-    const rect = imgEl.getBoundingClientRect();
+  // ===== OCR helpers =====
+  const ocrSelectedItem: OcrItem | null = useMemo(() => {
+    if (!ocrResult?.items?.length) return null;
+    const idx = Math.min(Math.max(0, ocrSelectedIdx), ocrResult.items.length - 1);
+    return ocrResult.items[idx] ?? null;
+  }, [ocrResult, ocrSelectedIdx]);
 
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+  const ocrPreviewSrc = useMemo(() => {
+    if (!ocrSelectedItem?.preview_b64) return null;
+    return `data:image/png;base64,${ocrSelectedItem.preview_b64}`;
+  }, [ocrSelectedItem]);
 
-    if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
-      if (hoverId !== 0) setHoverId(0);
-      return;
-    }
-
-    // Convertir coords render -> coords natural
-    const nx = Math.floor((x / rect.width) * idMapW);
-    const ny = Math.floor((y / rect.height) * idMapH);
-
-    const idx = ny * idMapW + nx;
-    const id = idMapData[idx] ?? 0;
-
-    if (id !== hoverId) setHoverId(id);
-  };
-
-  const onOverlayMouseLeave = () => {
-    setHoverId(0);
-  };
+  const ocrDetections: OcrDetection[] = (ocrSelectedItem?.detections ?? []) as OcrDetection[];
 
   return (
     <div className="min-h-screen bg-black text-slate-50 flex flex-col">
@@ -527,9 +633,7 @@ export default function App() {
             </span>
           </div>
         </div>
-        <div className="text-[11px] text-slate-500 uppercase tracking-[0.25em]">
-          Beta · Local Playground
-        </div>
+        <div className="text-[11px] text-slate-500 uppercase tracking-[0.25em]">Beta · Local Playground</div>
       </header>
 
       {/* MAIN GRID */}
@@ -539,95 +643,177 @@ export default function App() {
           <section className="col-span-12 lg:col-span-3 h-full rounded-2xl border border-slate-900 bg-slate-950/70 backdrop-blur-md p-5 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-100">1. Panel de análisis</h2>
-              <div className="text-[11px] text-slate-400">v0.2</div>
+              <div className="text-[11px] text-slate-400">v0.4</div>
             </div>
 
+            {/* TOOL TOGGLE */}
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-[11px] text-slate-400 uppercase tracking-widest">Tool</span>
+              <div className="inline-flex rounded-full bg-slate-900/80 p-0.5 text-[11px]">
+                <button
+                  onClick={() => onToolModeChange("sam3")}
+                  className={`px-3 py-1 rounded-full transition ${
+                    toolMode === "sam3"
+                      ? "bg-emerald-500 text-slate-950"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  SAM3
+                </button>
+                <button
+                  onClick={() => onToolModeChange("ocr")}
+                  className={`px-3 py-1 rounded-full transition ${
+                    toolMode === "ocr"
+                      ? "bg-emerald-500 text-slate-950"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  OCR
+                </button>
+              </div>
+            </div>
+
+            {/* STEP 1 UPLOAD */}
             <div className="space-y-2 text-xs">
               <p className="text-[11px] text-slate-400">
-                <span className="font-semibold text-emerald-400">Paso 1 ·</span> Sube una imagen
+                <span className="font-semibold text-emerald-400">Paso 1 ·</span>{" "}
+                {toolMode === "sam3" ? "Sube una imagen" : "Sube hasta 10 imágenes (OCR)"}
               </p>
               <input
                 type="file"
                 accept="image/*"
+                multiple={toolMode === "ocr"}
                 onChange={onFileChange}
                 className="block w-full text-[11px] file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-500 file:text-slate-950 hover:file:bg-emerald-400 cursor-pointer"
               />
+              {toolMode === "ocr" && (
+                <div className="text-[11px] text-slate-500">
+                  Cargadas: <span className="text-slate-200 font-semibold">{ocrFiles.length}</span> / 10
+                </div>
+              )}
             </div>
 
-            <div className="space-y-2 text-xs">
-              <p className="text-[11px] text-slate-400">
-                <span className="font-semibold text-emerald-400">Paso 2 ·</span> Prompt / clase a segmentar
-              </p>
-              <input
-                type="text"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                className="w-full rounded-md bg-black/40 border border-slate-800 px-3 py-2 text-[12px] focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
-                placeholder="Ej: columns, walls, floors..."
-              />
-              <p className="text-[11px] text-slate-500">
-                Tip: prompts específicos suelen ayudar (ej. “structural column”, “concrete wall”).
-              </p>
-            </div>
+            {/* SAM3 CONTROLS */}
+            {toolMode === "sam3" && (
+              <>
+                <div className="space-y-2 text-xs">
+                  <p className="text-[11px] text-slate-400">
+                    <span className="font-semibold text-emerald-400">Paso 2 ·</span> Prompt / clase a segmentar
+                  </p>
+                  <input
+                    type="text"
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    className="w-full rounded-md bg-black/40 border border-slate-800 px-3 py-2 text-[12px] focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
+                    placeholder="Ej: columns, walls, floors..."
+                  />
+                  <p className="text-[11px] text-slate-500">
+                    Tip: prompts específicos suelen ayudar (ej. “structural column”, “concrete wall”).
+                  </p>
+                </div>
 
-            <div className="space-y-2 text-xs">
-              <p className="text-[11px] text-slate-400">
-                <span className="font-semibold text-emerald-400">Paso 3 ·</span> Umbral score (0–1)
-              </p>
-              <div className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={threshold}
-                  onChange={(e) => setThreshold(parseFloat(e.target.value))}
-                  className="flex-1 accent-emerald-500"
-                />
-                <span className="w-12 text-right text-[11px]">{clamp01(threshold).toFixed(2)}</span>
-              </div>
-            </div>
+                <div className="space-y-2 text-xs">
+                  <p className="text-[11px] text-slate-400">
+                    <span className="font-semibold text-emerald-400">Paso 3 ·</span> Umbral score (0–1)
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={threshold}
+                      onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                      className="flex-1 accent-emerald-500"
+                    />
+                    <span className="w-12 text-right text-[11px]">{clamp01(threshold).toFixed(2)}</span>
+                  </div>
+                </div>
 
-            <div className="flex items-center justify-between pt-2">
-              <span className="text-[11px] text-slate-400 uppercase tracking-widest">Mode</span>
-              <div className="inline-flex rounded-full bg-slate-900/80 p-0.5 text-[11px]">
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-[11px] text-slate-400 uppercase tracking-widest">Mode</span>
+                  <div className="inline-flex rounded-full bg-slate-900/80 p-0.5 text-[11px]">
+                    <button
+                      onClick={() => onModeChange("simple")}
+                      className={`px-3 py-1 rounded-full transition ${
+                        mode === "simple"
+                          ? "bg-emerald-500 text-slate-950"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Simple
+                    </button>
+                    <button
+                      onClick={() => onModeChange("multi")}
+                      className={`px-3 py-1 rounded-full transition ${
+                        mode === "multi"
+                          ? "bg-emerald-500 text-slate-950"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Multi
+                    </button>
+                  </div>
+                </div>
+
                 <button
-                  onClick={() => onModeChange("simple")}
-                  className={`px-3 py-1 rounded-full transition ${
-                    mode === "simple" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
-                  }`}
+                  onClick={handleSubmit}
+                  disabled={loading || !file}
+                  className="mt-2 inline-flex items-center justify-center rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold px-4 py-3 disabled:opacity-40 disabled:cursor-not-allowed shadow-[0_0_28px_rgba(16,185,129,0.45)] transition"
                 >
-                  Simple
+                  {loading ? "Segmentando..." : "Segmentar"}
                 </button>
-                <button
-                  onClick={() => onModeChange("multi")}
-                  className={`px-3 py-1 rounded-full transition ${
-                    mode === "multi" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  Multi
-                </button>
-              </div>
-            </div>
+              </>
+            )}
 
-            <button
-              onClick={handleSubmit}
-              disabled={loading || !file}
-              className="mt-2 inline-flex items-center justify-center rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold px-4 py-3 disabled:opacity-40 disabled:cursor-not-allowed shadow-[0_0_28px_rgba(16,185,129,0.45)] transition"
-            >
-              {loading ? "Segmentando..." : "Segmentar"}
-            </button>
+            {/* OCR CONTROLS */}
+            {toolMode === "ocr" && (
+              <>
+                <button
+                  onClick={handleOcr}
+                  disabled={loading || ocrFiles.length === 0}
+                  className="mt-2 inline-flex items-center justify-center rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold px-4 py-3 disabled:opacity-40 disabled:cursor-not-allowed shadow-[0_0_28px_rgba(16,185,129,0.45)] transition"
+                >
+                  {loading ? "Leyendo..." : "Extraer claves (OCR)"}
+                </button>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={downloadOcrCsv}
+                    disabled={!ocrResult}
+                    className="inline-flex flex-1 items-center justify-center rounded-xl bg-slate-200/10 hover:bg-slate-200/15 text-slate-100 text-[12px] font-semibold px-3 py-2 border border-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                  >
+                    Descargar CSV
+                  </button>
+                  <button
+                    onClick={() => {
+                      setOcrResult(null);
+                      setOcrSelectedIdx(0);
+                    }}
+                    disabled={!ocrResult}
+                    className="inline-flex items-center justify-center rounded-xl bg-slate-200/10 hover:bg-slate-200/15 text-slate-100 text-[12px] font-semibold px-3 py-2 border border-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    title="Limpiar resultados"
+                  >
+                    Limpiar
+                  </button>
+                </div>
+              </>
+            )}
 
             {loading && (
               <div className="rounded-xl border border-slate-900 bg-black/40 p-3 render-noise">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-[11px] text-slate-300">Rendering preview</span>
-                  <span className="text-[11px] text-slate-500">SAM3</span>
+                  <span className="text-[11px] text-slate-300">Processing</span>
+                  <span className="text-[11px] text-slate-500">{toolMode === "sam3" ? "SAM3" : "OCR"}</span>
                 </div>
                 <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
                   <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
                 </div>
-                <p className="mt-2 text-[11px] text-slate-500">Segmentando máscaras + generando overlay…</p>
+                <p className="mt-2 text-[11px] text-slate-500">
+                  {toolMode === "sam3"
+                    ? "Segmentando máscaras + generando overlay…"
+                    : "Detectando texto + destacando regiones…"}
+                </p>
               </div>
             )}
 
@@ -637,53 +823,76 @@ export default function App() {
               </div>
             )}
 
-            <div className="rounded-2xl border border-slate-900 bg-black/35 p-4">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] text-slate-400 uppercase tracking-widest">último resultado</span>
-                <span className="text-[11px] text-slate-500">
-                  {lastResult?.session_id ? `session ${lastResult.session_id}` : "--"}
-                </span>
-              </div>
+            {/* OCR summary box */}
+            {toolMode === "ocr" && (
+              <div className="rounded-2xl border border-slate-900 bg-black/35 p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-slate-400 uppercase tracking-widest">OCR Resultado</span>
+                  <span className="text-[11px] text-slate-500">
+                    {ocrResult ? `${ocrResult.unique_codes?.length ?? 0} claves únicas` : "--"}
+                  </span>
+                </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-3 text-[11px]">
-                <div className="rounded-xl bg-slate-950/60 border border-slate-900 p-3">
-                  <div className="text-slate-400">Prompt</div>
-                  <div className="text-emerald-300 font-semibold mt-1">{lastResult?.class_name ?? "--"}</div>
-                </div>
-                <div className="rounded-xl bg-slate-950/60 border border-slate-900 p-3">
-                  <div className="text-slate-400">Objetos</div>
-                  <div className="text-emerald-300 font-semibold mt-1">{lastResult?.num_objects ?? 0}</div>
-                </div>
-                <div className="rounded-xl bg-slate-950/60 border border-slate-900 p-3">
-                  <div className="text-slate-400">Umbral</div>
-                  <div className="text-slate-200 font-semibold mt-1">{(lastResult?.threshold ?? threshold).toFixed(2)}</div>
-                </div>
-                <div className="rounded-xl bg-slate-950/60 border border-slate-900 p-3">
-                  <div className="text-slate-400">Tags</div>
-                  <div className="text-slate-200 font-semibold mt-1">{labels.length}</div>
-                </div>
-              </div>
+                {ocrResult ? (
+                  <>
+                    <div className="mt-3 text-[11px] text-slate-500">
+                      Procesadas: <span className="text-slate-200 font-semibold">{ocrResult.items.length}</span>{" "}
+                      imágenes.
+                    </div>
 
-              {lastResult && lastResult.num_objects === 0 && (
-                <div className="mt-3 text-[11px] text-amber-300 bg-amber-950/35 border border-amber-900 rounded-xl px-3 py-2">
-                  No se encontraron objetos para ese prompt.
-                </div>
-              )}
-            </div>
+                    <div className="mt-3">
+                      {(ocrResult.unique_codes ?? []).length === 0 ? (
+                        <div className="text-[11px] text-slate-500">No se detectaron claves con el patrón actual.</div>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {(ocrResult.unique_codes ?? []).slice(0, 18).map((c) => (
+                            <span
+                              key={c}
+                              className="text-[11px] px-2 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-200"
+                            >
+                              {c}
+                            </span>
+                          ))}
+                          {(ocrResult.unique_codes ?? []).length > 18 && (
+                            <span className="text-[11px] px-2 py-1 rounded-full bg-slate-200/10 border border-slate-800 text-slate-300">
+                              +{(ocrResult.unique_codes ?? []).length - 18} más
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-3 text-[11px] text-slate-500">Ejecuta OCR para ver el resumen.</div>
+                )}
+              </div>
+            )}
           </section>
 
           {/* Q2 */}
           <section className="col-span-12 lg:col-span-5 h-full rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-100">2. Imagen original</h2>
-              <span className="text-[11px] text-slate-500">{file ? file.name : "—"}</span>
+              <span className="text-[11px] text-slate-500">
+                {toolMode === "sam3"
+                  ? file
+                    ? file.name
+                    : "—"
+                  : ocrFiles.length > 0
+                    ? `${ocrFiles[Math.min(ocrSelectedIdx, ocrFiles.length - 1)].name} (${ocrSelectedIdx + 1}/${ocrFiles.length})`
+                    : "—"}
+              </span>
             </div>
 
             <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center">
               {originalSrc ? (
                 <img src={originalSrc} alt="Imagen original" className="max-h-full max-w-full object-contain" />
               ) : (
-                <div className="text-slate-500 text-sm px-6 text-center">Sube una imagen para comenzar.</div>
+                <div className="text-slate-500 text-sm px-6 text-center">
+                  {toolMode === "sam3"
+                    ? "Sube una imagen para comenzar."
+                    : "Sube 1 a 10 imágenes para OCR y luego ejecuta extracción."}
+                </div>
               )}
             </div>
           </section>
@@ -694,106 +903,253 @@ export default function App() {
             <div className="flex-1 rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-100">
-                  3. Resultado + Hover Highlight
+                  {toolMode === "sam3" ? "3. Resultado + Hover Highlight" : "3. OCR Resultados (por imagen)"}
                 </h2>
-                <span className="text-[11px] text-slate-500">{labels.length} instancias</span>
+                <span className="text-[11px] text-slate-500">
+                  {toolMode === "sam3" ? `${labels.length} instancias` : `${ocrResult?.items.length ?? 0} imágenes`}
+                </span>
               </div>
 
-              <div
-                className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden relative flex items-center justify-center"
-                onMouseMove={onOverlayMouseMove}
-                onMouseLeave={onOverlayMouseLeave}
-              >
-                {loading && (
-                  <div className="absolute inset-0 z-10 flex items-center justify-center">
-                    <div className="w-[92%] max-w-[520px] rounded-2xl border border-slate-900 bg-black/45 p-4 render-noise">
-                      <div className="text-[11px] text-slate-300 mb-2 flex items-center justify-between">
-                        <span>Subsampling preview</span>
-                        <span className="text-slate-500">SAM3</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
-                        <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
-                      </div>
-                      <div className="mt-3 text-[11px] text-slate-500">
-                        Construyendo máscara → overlay → id_map → labels…
-                      </div>
-                    </div>
-                  </div>
-                )}
+              {/* SAM3 */}
+              {toolMode === "sam3" ? (
+                <div
+                  className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden relative flex items-center justify-center"
+                  onMouseMove={(e) => {
+                    if (!idMapData || !overlayImgRef.current || !idMapW || !idMapH) return;
 
-                {overlaySrc ? (
-                  <>
-                    <img
-                      ref={overlayImgRef}
-                      src={overlaySrc}
-                      alt="Resultado de segmentación"
-                      className={`max-h-full max-w-full object-contain ${loading ? "blur-[2px] opacity-60" : ""}`}
-                      onLoad={() => syncHoverCanvasToImage()}
-                    />
+                    const imgEl = overlayImgRef.current;
+                    const rect = imgEl.getBoundingClientRect();
 
-                    {/* Canvas transparente para outline/glow (NO pinta fondo) */}
-                    <canvas
-                      ref={hoverCanvasRef}
-                      className="absolute pointer-events-none z-20"
-                      style={{ width: "100%", height: "100%" }}
-                    />
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
 
-                    {/* TAGS */}
-                    {labels.map((lbl) => {
-                      const isActive = hoverId === lbl.id;
-                      return (
-                        <div
-                          key={lbl.id}
-                          className="absolute z-30"
-                          style={{
-                            left: `${clamp01(lbl.cx) * 100}%`,
-                            top: `${clamp01(lbl.cy) * 100}%`,
-                            transform: "translate(-50%, -50%)",
-                          }}
-                        >
-                          <button
-                            type="button"
-                            onMouseEnter={() => setHoverId(lbl.id)}
-                            onMouseLeave={() => setHoverId(0)}
-                            className={`px-2 py-1 rounded-md text-[10px] font-extrabold shadow-lg border transition ${
-                              isActive ? "border-emerald-300/70" : "border-black/60"
-                            }`}
+                    if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+                      if (hoverId !== 0) setHoverId(0);
+                      return;
+                    }
+
+                    const nx = Math.floor((x / rect.width) * idMapW);
+                    const ny = Math.floor((y / rect.height) * idMapH);
+
+                    const idx = ny * idMapW + nx;
+                    const id = idMapData[idx] ?? 0;
+
+                    if (id !== hoverId) setHoverId(id);
+                  }}
+                  onMouseLeave={onOverlayMouseLeave}
+                >
+                  {overlaySrc ? (
+                    <>
+                      <img
+                        ref={overlayImgRef}
+                        src={overlaySrc}
+                        alt="Resultado de segmentación"
+                        className={`max-h-full max-w-full object-contain ${loading ? "blur-[2px] opacity-60" : ""}`}
+                        onLoad={() => syncHoverCanvasToImage()}
+                      />
+
+                      <canvas
+                        ref={hoverCanvasRef}
+                        className="absolute pointer-events-none z-20"
+                        style={{ width: "100%", height: "100%" }}
+                      />
+
+                      {labels.map((lbl) => {
+                        const isActive = hoverId === lbl.id;
+                        return (
+                          <div
+                            key={lbl.id}
+                            className="absolute z-30"
                             style={{
-                              background: "rgba(0,0,0,0.78)",
-                              color: "white",
-                              boxShadow: isActive
-                                ? "0 0 0 1px rgba(16,185,129,0.35), 0 0 18px rgba(16,185,129,0.35)"
-                                : undefined,
+                              left: `${clamp01(lbl.cx) * 100}%`,
+                              top: `${clamp01(lbl.cy) * 100}%`,
+                              transform: "translate(-50%, -50%)",
                             }}
                           >
-                            <span
-                              className="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle"
-                              style={{ background: lbl.color }}
-                            />
-                            ID {lbl.id}
-                          </button>
+                            <button
+                              type="button"
+                              onMouseEnter={() => setHoverId(lbl.id)}
+                              onMouseLeave={() => setHoverId(0)}
+                              className={`px-2 py-1 rounded-md text-[10px] font-extrabold shadow-lg border transition ${
+                                isActive ? "border-emerald-300/70" : "border-black/60"
+                              }`}
+                              style={{
+                                background: "rgba(0,0,0,0.78)",
+                                color: "white",
+                                boxShadow: isActive
+                                  ? "0 0 0 1px rgba(16,185,129,0.35), 0 0 18px rgba(16,185,129,0.35)"
+                                  : undefined,
+                              }}
+                            >
+                              <span
+                                className="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle"
+                                style={{ background: lbl.color }}
+                              />
+                              ID {lbl.id}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </>
+                  ) : (
+                    <div className="text-slate-500 text-sm px-6 text-center">
+                      Cuando ejecutes <span className="font-semibold">“Segmentar”</span>, aquí verás la segmentación y
+                      podrás resaltar máscaras con hover (como Meta).
+                    </div>
+                  )}
+
+                  {idMapSrc && <img src={idMapSrc} alt="id_map" className="hidden" />}
+                </div>
+              ) : (
+                // OCR
+                <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex flex-col">
+                  {!ocrResult ? (
+                    <div className="flex-1 flex items-center justify-center text-slate-500 text-sm px-6 text-center">
+                      Sube imágenes y ejecuta <span className="font-semibold mx-1">“Extraer claves (OCR)”</span>.
+                    </div>
+                  ) : (
+                    <div className="flex-1 grid grid-cols-12 gap-3 p-3">
+                      {/* Lista de items */}
+                      <div className="col-span-5 rounded-2xl border border-slate-900 bg-slate-950/40 overflow-hidden flex flex-col">
+                        <div className="px-3 py-2 bg-slate-900/60 flex items-center justify-between">
+                          <span className="text-[11px] font-semibold text-slate-200">Imágenes</span>
+                          <span className="text-[11px] text-slate-400">{ocrResult.items.length}</span>
                         </div>
-                      );
-                    })}
-                  </>
-                ) : (
-                  <div className="text-slate-500 text-sm px-6 text-center">
-                    Cuando ejecutes <span className="font-semibold">“Segmentar”</span>, aquí verás la segmentación
-                    y podrás resaltar máscaras con hover (como Meta).
-                  </div>
-                )}
 
-                {/* id_map hidden (solo para asegurar que exista / debug opcional) */}
-                {idMapSrc && <img src={idMapSrc} alt="id_map" className="hidden" />}
-              </div>
+                        <div className="grid grid-cols-3 px-3 py-2 text-[11px] text-slate-400 border-t border-slate-900/70">
+                          <span>Idx</span>
+                          <span>Claves</span>
+                          <span className="text-right">#</span>
+                        </div>
 
-              {/* Tabla instancias */}
-              {labels.length > 0 && (
+                        <div className="flex-1 overflow-auto">
+                          {ocrResult.items.map((it, idx) => {
+                            const active = idx === ocrSelectedIdx;
+                            return (
+                              <button
+                                key={`${it.filename}-${idx}`}
+                                className={`w-full text-left grid grid-cols-3 px-3 py-2 text-[11px] border-t border-slate-900/60 transition ${
+                                  active ? "bg-emerald-500/10" : "hover:bg-slate-200/5"
+                                }`}
+                                onClick={() => setOcrSelectedIdx(idx)}
+                                type="button"
+                              >
+                                <span className="text-slate-200 font-semibold">{idx + 1}</span>
+                                <span className="text-slate-300 truncate" title={(it.codes ?? []).join(" | ")}>
+                                  {(it.codes ?? []).join(" | ") || "--"}
+                                </span>
+                                <span className="text-right text-slate-200">{(it.codes ?? []).length}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Detalle del seleccionado */}
+                      <div className="col-span-7 rounded-2xl border border-slate-900 bg-slate-950/40 overflow-hidden flex flex-col">
+                        <div className="px-3 py-2 bg-slate-900/60 flex items-center justify-between">
+                          <div className="min-w-0">
+                            <div className="text-[11px] text-slate-400">Seleccionado</div>
+                            <div className="text-[11px] text-slate-200 font-semibold truncate">
+                              {ocrSelectedItem?.filename ?? "--"}
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-slate-400">
+                            {ocrSelectedIdx + 1}/{ocrResult.items.length}
+                          </div>
+                        </div>
+
+                        <div className="p-3 flex-1 flex flex-col gap-3 overflow-auto">
+                          {/* Preview con boxes */}
+                          <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center">
+                            {ocrPreviewSrc ? (
+                              <img src={ocrPreviewSrc} alt="OCR preview" className="max-h-[320px] w-auto object-contain" />
+                            ) : (
+                              <div className="text-[11px] text-slate-500 px-4 py-10 text-center">
+                                No hay preview_b64 disponible (backend aún no lo genera).
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Codes */}
+                          <div className="rounded-2xl border border-slate-900 bg-black/35 p-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-[11px] font-semibold text-slate-200">Claves detectadas</span>
+                              <span className="text-[11px] text-slate-400">{(ocrSelectedItem?.codes ?? []).length}</span>
+                            </div>
+
+                            {(ocrSelectedItem?.codes ?? []).length === 0 ? (
+                              <div className="text-[11px] text-slate-500">--</div>
+                            ) : (
+                              <div className="flex flex-wrap gap-2">
+                                {(ocrSelectedItem?.codes ?? []).map((c) => (
+                                  <span
+                                    key={c}
+                                    className="text-[11px] px-2 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-200"
+                                  >
+                                    {c}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Detections table */}
+                          <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden">
+                            <div className="px-3 py-2 bg-slate-900/60 flex items-center justify-between">
+                              <span className="text-[11px] font-semibold text-slate-200">Detections</span>
+                              <span className="text-[11px] text-slate-400">{ocrDetections.length}</span>
+                            </div>
+
+                            <div className="grid grid-cols-3 px-3 py-2 text-[11px] text-slate-400 border-t border-slate-900/70">
+                              <span>Text</span>
+                              <span>Clean</span>
+                              <span className="text-right">Conf</span>
+                            </div>
+
+                            <div className="max-h-[160px] overflow-auto">
+                              {ocrDetections.length === 0 ? (
+                                <div className="px-3 py-3 text-[11px] text-slate-500">
+                                  Sin detecciones (o backend aún no devuelve detections).
+                                </div>
+                              ) : (
+                                ocrDetections.map((d, i) => (
+                                  <div
+                                    key={`${d.clean || d.text}-${i}`}
+                                    className="grid grid-cols-3 px-3 py-2 text-[11px] border-t border-slate-900/60"
+                                  >
+                                    <span className="text-slate-200 truncate" title={d.text}>
+                                      {d.text}
+                                    </span>
+                                    <span className="text-slate-300 truncate" title={d.clean}>
+                                      {d.clean}
+                                    </span>
+                                    <span className="text-right text-slate-200">{(d.conf ?? 0).toFixed(2)}</span>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Raw text */}
+                          <div className="rounded-2xl border border-slate-900 bg-black/35 p-3">
+                            <div className="text-[11px] font-semibold text-slate-200 mb-2">Raw text</div>
+                            <pre className="text-[11px] text-slate-300 whitespace-pre-wrap break-words">
+                              {ocrSelectedItem?.raw_text ?? "--"}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tabla instancias (SAM3) */}
+              {toolMode === "sam3" && labels.length > 0 && (
                 <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden">
                   <div className="px-4 py-3 bg-slate-900/60 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-200">
-                      Instancias (hover para resaltar)
-                    </span>
+                    <span className="text-[11px] font-semibold text-slate-200">Instancias (hover para resaltar)</span>
                     <span className="text-[11px] text-slate-400">{labels.length} objetos</span>
                   </div>
 
@@ -815,13 +1171,11 @@ export default function App() {
                         onMouseLeave={() => setHoverId(0)}
                       >
                         <span className="font-semibold text-slate-100">#{lbl.id}</span>
-                        <span className="text-slate-300">{formatClassName(lastResult?.class_name ?? "")}</span>
+                        {/* ✅ FIX: clase por instancia */}
+                        <span className="text-slate-300">{formatClassName(lbl.class_name)}</span>
                         <span className="text-right text-slate-200">{lbl.score.toFixed(3)}</span>
                         <span className="text-right">
-                          <span
-                            className="inline-block w-3 h-3 rounded-full"
-                            style={{ background: lbl.color }}
-                          />
+                          <span className="inline-block w-3 h-3 rounded-full" style={{ background: lbl.color }} />
                         </span>
                       </div>
                     ))}
@@ -830,91 +1184,89 @@ export default function App() {
               )}
             </div>
 
-            {/* Q4 */}
-            <div className="h-[340px] rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-100">4. Conteos + Gráfica</h2>
+            {/* Q4 (solo SAM3) */}
+            {toolMode === "sam3" && (
+              <div className="h-[340px] rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-slate-100">4. Conteos + Gráfica</h2>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-400">Chart</span>
-                  <select
-                    value={chartType}
-                    onChange={(e) => setChartType(e.target.value as ChartType)}
-                    className="text-[11px] bg-black/40 border border-slate-800 rounded-md px-2 py-1 text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  >
-                    <option value="donut">Donut</option>
-                    <option value="pie">Pie</option>
-                    <option value="bubble">Bubble</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden">
-                <div className="grid grid-cols-3 px-4 py-2 text-[11px] bg-slate-900/60 text-slate-400">
-                  <span>Clase</span>
-                  <span className="text-right">Objetos</span>
-                  <span className="text-right">%</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-400">Chart</span>
+                    <select
+                      value={chartType}
+                      onChange={(e) => setChartType(e.target.value as ChartType)}
+                      className="text-[11px] bg-black/40 border border-slate-800 rounded-md px-2 py-1 text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="donut">Donut</option>
+                      <option value="pie">Pie</option>
+                      <option value="bubble">Bubble</option>
+                    </select>
+                  </div>
                 </div>
 
-                <div className="max-h-[120px] overflow-auto">
+                <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden">
+                  <div className="grid grid-cols-3 px-4 py-2 text-[11px] bg-slate-900/60 text-slate-400">
+                    <span>Clase</span>
+                    <span className="text-right">Objetos</span>
+                    <span className="text-right">%</span>
+                  </div>
+
+                  <div className="max-h-[120px] overflow-auto">
+                    {aggregatedCounts.length === 0 ? (
+                      <div className="px-4 py-3 text-[11px] text-slate-500">Ejecuta segmentaciones para ver conteos aquí.</div>
+                    ) : (
+                      aggregatedCounts.map((row) => (
+                        <div
+                          key={row.className}
+                          className="grid grid-cols-3 px-4 py-2 text-[11px] border-t border-slate-900/60"
+                        >
+                          <span className="text-slate-100 font-medium">{row.className}</span>
+                          <span className="text-right text-slate-200">{row.count}</span>
+                          <span className="text-right text-slate-300">
+                            {totalObjects > 0 ? ((row.count / totalObjects) * 100).toFixed(1) : "0.0"}%
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-3 px-4 py-2 text-[11px] bg-slate-900/60 border-t border-slate-900/70 font-semibold">
+                    <span>Total</span>
+                    <span className="text-right">{totalObjects}</span>
+                    <span />
+                  </div>
+                </div>
+
+                <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 p-3">
                   {aggregatedCounts.length === 0 ? (
-                    <div className="px-4 py-3 text-[11px] text-slate-500">
-                      Ejecuta segmentaciones para ver conteos aquí.
-                    </div>
+                    <div className="h-full flex items-center justify-center text-[11px] text-slate-500">Sin datos todavía.</div>
+                  ) : chartType === "bubble" ? (
+                    <BubbleChart data={aggregatedCounts} />
+                  ) : chartType === "pie" ? (
+                    <PieDonutChart data={aggregatedCounts} type="pie" />
                   ) : (
-                    aggregatedCounts.map((row) => (
-                      <div
-                        key={row.className}
-                        className="grid grid-cols-3 px-4 py-2 text-[11px] border-t border-slate-900/60"
-                      >
-                        <span className="text-slate-100 font-medium">{row.className}</span>
-                        <span className="text-right text-slate-200">{row.count}</span>
-                        <span className="text-right text-slate-300">
-                          {totalObjects > 0 ? ((row.count / totalObjects) * 100).toFixed(1) : "0.0"}%
-                        </span>
-                      </div>
-                    ))
+                    <PieDonutChart data={aggregatedCounts} type="donut" />
+                  )}
+
+                  {aggregatedCounts.length > 0 && maxCount > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      {aggregatedCounts.slice(0, 4).map((row) => (
+                        <div key={row.className} className="flex items-center gap-2">
+                          <span className="w-16 text-[11px] text-slate-400 truncate">{row.className}</span>
+                          <div className="flex-1 h-2 rounded-full bg-slate-900 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-emerald-400/80"
+                              style={{ width: `${(row.count / maxCount) * 100}%` }}
+                            />
+                          </div>
+                          <span className="w-8 text-right text-[11px] text-slate-200">{row.count}</span>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
-
-                <div className="grid grid-cols-3 px-4 py-2 text-[11px] bg-slate-900/60 border-t border-slate-900/70 font-semibold">
-                  <span>Total</span>
-                  <span className="text-right">{totalObjects}</span>
-                  <span />
-                </div>
               </div>
-
-              <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 p-3">
-                {aggregatedCounts.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-[11px] text-slate-500">
-                    Sin datos todavía.
-                  </div>
-                ) : chartType === "bubble" ? (
-                  <BubbleChart data={aggregatedCounts} />
-                ) : chartType === "pie" ? (
-                  <PieDonutChart data={aggregatedCounts} type="pie" />
-                ) : (
-                  <PieDonutChart data={aggregatedCounts} type="donut" />
-                )}
-
-                {aggregatedCounts.length > 0 && maxCount > 0 && (
-                  <div className="mt-3 space-y-1.5">
-                    {aggregatedCounts.slice(0, 4).map((row) => (
-                      <div key={row.className} className="flex items-center gap-2">
-                        <span className="w-16 text-[11px] text-slate-400 truncate">{row.className}</span>
-                        <div className="flex-1 h-2 rounded-full bg-slate-900 overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-emerald-400/80"
-                            style={{ width: `${(row.count / maxCount) * 100}%` }}
-                          />
-                        </div>
-                        <span className="w-8 text-right text-[11px] text-slate-200">{row.count}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+            )}
           </section>
         </div>
       </main>

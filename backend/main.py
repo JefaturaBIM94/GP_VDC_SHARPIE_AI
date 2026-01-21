@@ -18,8 +18,19 @@ from backend.session_store import (
     IMAGES_DIR,
 )
 
+
+
+
 app = FastAPI(title="GPC SAM3 Backend")
 
+# backend/main.py
+from backend.ocr_routes import router as ocr_router
+
+app.include_router(ocr_router)
+
+
+
+# Configurar CORS para desarrollo local con frontend en otro puerto 
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
