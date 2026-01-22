@@ -1,5 +1,5 @@
 // frontend/src/App.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "./index.css";
 import {
   segmentImage,
@@ -11,6 +11,8 @@ import {
   type OcrDetection,
 } from "./api";
 import Sam3CompareView from "./views/Sam3CompareView";
+import { SegmentViewer } from "./components/SegmentViewer";
+import ResultSidePanel from "./components/ResultSidePanel";
 
 type CountMode = "simple" | "multi";
 type ChartType = "donut" | "pie" | "bubble";
@@ -199,76 +201,8 @@ function BubbleChart({
 }
 
 /** ======= Hover Highlight helpers (SAM3) ======= */
-type EdgeMap = Map<number, Uint32Array>;
+// (EdgeMap type was moved to SegmentViewer)
 
-function computeEdgesFromIdMap(idMap: Uint8ClampedArray, w: number, h: number): EdgeMap {
-  const edgesById = new Map<number, number[]>();
-  const idx = (x: number, y: number) => y * w + x;
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const id = idMap[idx(x, y)];
-      if (id === 0) continue;
-
-      const n1 = idMap[idx(x - 1, y)];
-      const n2 = idMap[idx(x + 1, y)];
-      const n3 = idMap[idx(x, y - 1)];
-      const n4 = idMap[idx(x, y + 1)];
-      if (n1 !== id || n2 !== id || n3 !== id || n4 !== id) {
-        if (!edgesById.has(id)) edgesById.set(id, []);
-        edgesById.get(id)!.push((x << 16) | y);
-      }
-    }
-  }
-
-  const out: EdgeMap = new Map();
-  for (const [id, arr] of edgesById.entries()) out.set(id, new Uint32Array(arr));
-  return out;
-}
-
-function drawEdges(
-  ctx: CanvasRenderingContext2D,
-  edges: Uint32Array,
-  color: string,
-  scaleX: number,
-  scaleY: number
-) {
-  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-
-  ctx.save();
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-
-  ctx.globalAlpha = 0.85;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 18;
-  ctx.fillStyle = "rgba(255,255,255,0.0)";
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 3;
-
-  for (let i = 0; i < edges.length; i++) {
-    const packed = edges[i];
-    const x = (packed >>> 16) & 0xffff;
-    const y = packed & 0xffff;
-    const dx = x * scaleX;
-    const dy = y * scaleY;
-    ctx.fillRect(dx, dy, Math.max(1, scaleX), Math.max(1, scaleY));
-  }
-
-  ctx.shadowBlur = 0;
-  ctx.globalAlpha = 0.95;
-  ctx.fillStyle = "rgba(255,255,255,0.0)";
-  for (let i = 0; i < edges.length; i++) {
-    const packed = edges[i];
-    const x = (packed >>> 16) & 0xffff;
-    const y = packed & 0xffff;
-    const dx = x * scaleX;
-    const dy = y * scaleY;
-    ctx.fillRect(dx, dy, Math.max(1, scaleX), Math.max(1, scaleY));
-  }
-
-  ctx.restore();
-}
 
 /** ======= MAIN APP ======= */
 export default function App() {
@@ -295,17 +229,9 @@ export default function App() {
   const [ocrSelectedIdx, setOcrSelectedIdx] = useState<number>(0);
 
   // Hover state (SAM3)
-  const [hoverId, setHoverId] = useState<number>(0);
+  const [hoverId, setHoverId] = useState<number | null>(null);
 
-  // Refs para canvas hover (SAM3)
-  const overlayImgRef = useRef<HTMLImageElement | null>(null);
-  const hoverCanvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  // id_map loaded data (grayscale)
-  const [idMapData, setIdMapData] = useState<Uint8ClampedArray | null>(null);
-  const [idMapW, setIdMapW] = useState<number>(0);
-  const [idMapH, setIdMapH] = useState<number>(0);
-  const [edgeMap, setEdgeMap] = useState<EdgeMap | null>(null);
+  // legacy hover refs/states removed (SegmentViewer handles id_map and hover)
 
   const labels: InstanceLabel[] = lastResult?.labels ?? [];
 
@@ -313,11 +239,7 @@ export default function App() {
     setFile(null);
     setLastResult(null);
     setHistory([]);
-    setHoverId(0);
-    setIdMapData(null);
-    setIdMapW(0);
-    setIdMapH(0);
-    setEdgeMap(null);
+    setHoverId(null);
   };
 
   const resetOcr = () => {
@@ -351,12 +273,7 @@ export default function App() {
       setFile(f);
       setLastResult(null);
       setHistory([]);
-
-      setHoverId(0);
-      setIdMapData(null);
-      setIdMapW(0);
-      setIdMapH(0);
-      setEdgeMap(null);
+      setHoverId(null);
     } else {
       const files = Array.from(e.target.files ?? []);
       const limited = files.slice(0, 10);
@@ -398,7 +315,7 @@ export default function App() {
 
     setError(null);
     setLoading(true);
-    setHoverId(0);
+    setHoverId(null);
 
     try {
       const data = await segmentImage(file, prompt, threshold);
@@ -475,15 +392,11 @@ export default function App() {
     return ocrFiles[idx] ?? null;
   }, [toolMode, ocrFiles, ocrSelectedIdx]);
 
-  const sam3OriginalSrc = useObjectUrl(toolMode === "sam3" ? file : null);
-  const ocrOriginalSrc = useObjectUrl(toolMode === "ocr" ? ocrSelectedFile : null);
-  const originalSrc = toolMode === "sam3" ? sam3OriginalSrc : ocrOriginalSrc;
+  const sam3OriginalSrc = useObjectUrl((toolMode as ToolMode) === "sam3" ? file : null);
+  const ocrOriginalSrc = useObjectUrl((toolMode as ToolMode) === "ocr" ? ocrSelectedFile : null);
+  const originalSrc = (toolMode as ToolMode) === "sam3" ? sam3OriginalSrc : ocrOriginalSrc;
 
-  const overlaySrc = lastResult?.overlay_image_b64
-    ? `data:image/png;base64,${lastResult.overlay_image_b64}`
-    : null;
-
-  const idMapSrc = lastResult?.id_map_b64 ? `data:image/png;base64,${lastResult.id_map_b64}` : null;
+  // overlay and id_map are handled inside SegmentViewer now
 
   // ✅ FIX: ya no usamos class_name/num_objects; usamos classes_counts agregadas en history
   const aggregatedCounts = useMemo(() => {
@@ -505,109 +418,9 @@ export default function App() {
   const totalObjects = aggregatedCounts.reduce((acc, row) => acc + row.count, 0);
   const maxCount = aggregatedCounts.reduce((acc, row) => Math.max(acc, row.count), 0);
 
-  const colorById = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const l of labels) m.set(l.id, l.color);
-    return m;
-  }, [labels]);
+  // colorById is provided per-view inside SegmentViewer / panels
 
-  /** Cargar id_map PNG y convertirlo a Uint8ClampedArray (canal R) */
-  useEffect(() => {
-    if (!idMapSrc) {
-      setIdMapData(null);
-      setIdMapW(0);
-      setIdMapH(0);
-      setEdgeMap(null);
-      return;
-    }
-
-    let cancelled = false;
-    const img = new Image();
-    img.onload = () => {
-      if (cancelled) return;
-
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-
-      const c = document.createElement("canvas");
-      c.width = w;
-      c.height = h;
-      const ctx = c.getContext("2d", { willReadFrequently: true });
-      if (!ctx) return;
-
-      ctx.drawImage(img, 0, 0);
-      const imageData = ctx.getImageData(0, 0, w, h).data;
-
-      const ids = new Uint8ClampedArray(w * h);
-      for (let i = 0, p = 0; i < imageData.length; i += 4, p++) {
-        ids[p] = imageData[i];
-      }
-
-      setIdMapData(ids);
-      setIdMapW(w);
-      setIdMapH(h);
-
-      const edges = computeEdgesFromIdMap(ids, w, h);
-      setEdgeMap(edges);
-    };
-    img.src = idMapSrc;
-
-    return () => {
-      cancelled = true;
-    };
-  }, [idMapSrc]);
-
-  const syncHoverCanvasToImage = () => {
-    const imgEl = overlayImgRef.current;
-    const canvas = hoverCanvasRef.current;
-    if (!imgEl || !canvas) return;
-
-    const rect = imgEl.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(rect.width));
-    const h = Math.max(1, Math.floor(rect.height));
-
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
-  };
-
-  useEffect(() => {
-    syncHoverCanvasToImage();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overlaySrc, loading]);
-
-  useEffect(() => {
-    const onResize = () => syncHoverCanvasToImage();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
-  useEffect(() => {
-    const canvas = hoverCanvasRef.current;
-    const imgEl = overlayImgRef.current;
-    if (!canvas || !imgEl) return;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    if (!hoverId || !edgeMap || !idMapW || !idMapH) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-
-    const edges = edgeMap.get(hoverId);
-    if (!edges) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-
-    const scaleX = canvas.width / idMapW;
-    const scaleY = canvas.height / idMapH;
-
-    const color = colorById.get(hoverId) ?? "#34d399";
-    drawEdges(ctx, edges, color, scaleX, scaleY);
-  }, [hoverId, edgeMap, idMapW, idMapH, colorById]);
-
-  const onOverlayMouseLeave = () => setHoverId(0);
+  // legacy id_map & hover pipeline removed; SegmentViewer handles these tasks now
 
   // ===== OCR helpers =====
   const ocrSelectedItem: OcrItem | null = useMemo(() => {
@@ -647,8 +460,184 @@ export default function App() {
 
       {/* MAIN GRID */}
       <main className="flex-1 p-5 bg-gradient-to-br from-slate-950 via-black to-slate-950">
-        {(toolMode as ToolMode) === "sam3_compare" ? (
+        {/* Tool switcher SIEMPRE visible */}
+        <div className="mb-4 flex gap-2">
+          <button
+            type="button"
+            onClick={() => onToolModeChange("sam3")}
+            className={`px-4 py-2 rounded-xl border ${toolMode === "sam3" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
+          >
+            SAM3
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToolModeChange("ocr")}
+            className={`px-4 py-2 rounded-xl border ${toolMode === "ocr" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
+          >
+            OCR
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToolModeChange("sam3_compare")}
+            className={`px-4 py-2 rounded-xl border ${toolMode === "sam3_compare" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
+          >
+            SAM3COMPARE
+          </button>
+        </div>
+
+        {/* Contenido */}
+        {toolMode === "sam3_compare" ? (
           <Sam3CompareView />
+        ) : toolMode === "sam3" ? (
+          <div className="grid grid-cols-12 gap-4 h-[calc(100vh-110px)]">
+            {/* Panel Izquierdo: controles compactos */}
+            <div className="col-span-12 lg:col-span-3 h-full rounded-2xl border border-slate-900 bg-slate-950/70 p-5 flex flex-col gap-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-100">Controles</h2>
+                <div className="text-[11px] text-slate-400">SAM3</div>
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <p className="text-[11px] text-slate-400">
+                  <span className="font-semibold text-emerald-400">Paso 1 ·</span> Sube una imagen
+                </p>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={onFileChange}
+                  className="block w-full text-[11px] file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-500 file:text-slate-950 hover:file:bg-emerald-400 cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <p className="text-[11px] text-slate-400">
+                  <span className="font-semibold text-emerald-400">Paso 2 ·</span> Prompt / clase a segmentar
+                </p>
+                <input
+                  type="text"
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  className="w-full rounded-md bg-black/40 border border-slate-800 px-3 py-2 text-[12px] focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
+                  placeholder="Ej: columns"
+                />
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <p className="text-[11px] text-slate-400">
+                  <span className="font-semibold text-emerald-400">Paso 3 ·</span> Umbral score (0–1)
+                </p>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={threshold}
+                    onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                    className="flex-1 accent-emerald-500"
+                  />
+                  <span className="w-12 text-right text-[11px]">{clamp01(threshold).toFixed(2)}</span>
+                </div>
+              </div>
+
+              <div className="mt-auto">
+                <button
+                  onClick={handleSubmit}
+                  disabled={loading || !file}
+                  className="w-full inline-flex items-center justify-center rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold px-4 py-3 disabled:opacity-40 disabled:cursor-not-allowed shadow-[0_0_28px_rgba(16,185,129,0.45)] transition"
+                >
+                  {loading ? "Segmentando..." : "Segmentar"}
+                </button>
+
+                {loading && (
+                  <div className="mt-3 rounded-xl border border-slate-900 bg-black/40 p-3 render-noise">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] text-slate-300">Processing</span>
+                      <span className="text-[11px] text-slate-500">SAM3</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
+                      <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
+                    </div>
+                    <p className="mt-2 text-[11px] text-slate-500">Segmentando máscaras + generando overlay…</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Centro: visor grande */}
+            <div className="col-span-12 lg:col-span-6">
+              <div className="rounded-2xl border border-slate-900 bg-black/35 p-3 h-full">
+                <div className="text-sm opacity-80 mb-2">Resultado + Hover Highlight</div>
+
+                <SegmentViewer
+                  title="SAM3"
+                  file={file}
+                  result={lastResult}
+                  hoverId={hoverId ?? undefined}
+                  onHoverId={(id) => setHoverId(id === 0 ? null : id)}
+                  loading={loading}
+                />
+              </div>
+            </div>
+
+            {/* Derecha: métricas/tabla */}
+            <div className="col-span-12 lg:col-span-3">
+              <div className="rounded-2xl border border-slate-900 bg-black/35 p-3 h-full flex flex-col gap-3">
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs opacity-70">Instancias</div>
+                  <div className="text-2xl font-semibold">{lastResult?.labels?.length ?? 0}</div>
+                  <div className="text-xs opacity-70 mt-2">Top clases</div>
+                  <div className="text-sm">
+                    {lastResult?.classes_counts
+                      ? Object.entries(lastResult.classes_counts)
+                          .sort((a, b) => b[1] - a[1])
+                          .slice(0, 3)
+                          .map(([k, v]) => `${k}: ${v}`)
+                          .join(" · ")
+                      : "—"}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs opacity-70 mb-2">Hover</div>
+                  <div className="text-sm">{hoverId ? `ID ${hoverId}` : "Pasa el mouse sobre una instancia"}</div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3 overflow-auto max-h-[260px]">
+                  <div className="text-xs opacity-70 mb-2">Instancias</div>
+                  <table className="w-full text-xs">
+                    <thead className="opacity-70">
+                      <tr>
+                        <th className="text-left py-1">ID</th>
+                        <th className="text-left py-1">Clase</th>
+                        <th className="text-left py-1">Score</th>
+                        <th className="text-left py-1">Color</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(lastResult?.labels ?? []).map((it) => (
+                        <tr
+                          key={it.id}
+                          className={`cursor-pointer ${hoverId === it.id ? "bg-white/10" : "hover:bg-white/5"}`}
+                          onMouseEnter={() => setHoverId(it.id)}
+                          onMouseLeave={() => setHoverId(null)}
+                        >
+                          <td className="py-1 pr-2">{it.id}</td>
+                          <td className="py-1 pr-2">{it.class_name}</td>
+                          <td className="py-1 pr-2">{it.score.toFixed(3)}</td>
+                          <td className="py-1 pr-2">
+                            <span className="inline-block w-3 h-3 rounded" style={{ background: it.color }} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="grid grid-cols-12 gap-5 h-[calc(100vh-110px)]">
           {/* Q1 */}
@@ -665,7 +654,7 @@ export default function App() {
                 <button
                   onClick={() => onToolModeChange("sam3")}
                   className={`px-3 py-1 rounded-full transition ${
-                    toolMode === "sam3" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+                    (toolMode as ToolMode) === "sam3" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
                   SAM3
@@ -685,7 +674,7 @@ export default function App() {
                 <button
                   onClick={() => onToolModeChange("ocr")}
                   className={`px-3 py-1 rounded-full transition ${
-                    toolMode === "ocr" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+                    (toolMode as ToolMode) === "ocr" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
                   OCR
@@ -697,16 +686,16 @@ export default function App() {
             <div className="space-y-2 text-xs">
               <p className="text-[11px] text-slate-400">
                 <span className="font-semibold text-emerald-400">Paso 1 ·</span>{" "}
-                {toolMode === "sam3" ? "Sube una imagen" : "Sube hasta 10 imágenes (OCR)"}
+                {(toolMode as ToolMode) === "sam3" ? "Sube una imagen" : "Sube hasta 10 imágenes (OCR)"}
               </p>
-              <input
+                <input
                 type="file"
                 accept="image/*"
-                multiple={toolMode === "ocr"}
+                multiple={(toolMode as ToolMode) === "ocr"}
                 onChange={onFileChange}
                 className="block w-full text-[11px] file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-500 file:text-slate-950 hover:file:bg-emerald-400 cursor-pointer"
               />
-              {toolMode === "ocr" && (
+              {(toolMode as ToolMode) === "ocr" && (
                 <div className="text-[11px] text-slate-500">
                   Cargadas: <span className="text-slate-200 font-semibold">{ocrFiles.length}</span> / 10
                 </div>
@@ -714,7 +703,7 @@ export default function App() {
             </div>
 
             {/* SAM3 CONTROLS */}
-            {toolMode === "sam3" && (
+            {(toolMode as ToolMode) === "sam3" && (
               <>
                 <div className="space-y-2 text-xs">
                   <p className="text-[11px] text-slate-400">
@@ -783,6 +772,19 @@ export default function App() {
                 >
                   {loading ? "Segmentando..." : "Segmentar"}
                 </button>
+
+                {loading && (
+                  <div className="mt-3 rounded-xl border border-slate-900 bg-black/40 p-3 render-noise">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] text-slate-300">Processing</span>
+                      <span className="text-[11px] text-slate-500">SAM3</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
+                      <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
+                    </div>
+                    <p className="mt-2 text-[11px] text-slate-500">Segmentando máscaras + generando overlay…</p>
+                  </div>
+                )}
               </>
             )}
 
@@ -824,13 +826,13 @@ export default function App() {
               <div className="rounded-xl border border-slate-900 bg-black/40 p-3 render-noise">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-[11px] text-slate-300">Processing</span>
-                  <span className="text-[11px] text-slate-500">{toolMode === "sam3" ? "SAM3" : "OCR"}</span>
+                  <span className="text-[11px] text-slate-500">{(toolMode as ToolMode) === "sam3" ? "SAM3" : "OCR"}</span>
                 </div>
                 <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
                   <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
                 </div>
                 <p className="mt-2 text-[11px] text-slate-500">
-                  {toolMode === "sam3"
+                    {(toolMode as ToolMode) === "sam3"
                     ? "Segmentando máscaras + generando overlay…"
                     : "Detectando texto + destacando regiones…"}
                 </p>
@@ -893,8 +895,8 @@ export default function App() {
           <section className="col-span-12 lg:col-span-5 h-full rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-100">2. Imagen original</h2>
-              <span className="text-[11px] text-slate-500">
-                {toolMode === "sam3"
+                <span className="text-[11px] text-slate-500">
+                {(toolMode as ToolMode) === "sam3"
                   ? file
                     ? file.name
                     : "—"
@@ -909,7 +911,7 @@ export default function App() {
                 <img src={originalSrc} alt="Imagen original" className="max-h-full max-w-full object-contain" />
               ) : (
                 <div className="text-slate-500 text-sm px-6 text-center">
-                  {toolMode === "sam3"
+                  {(toolMode as ToolMode) === "sam3"
                     ? "Sube una imagen para comenzar."
                     : "Sube 1 a 10 imágenes para OCR y luego ejecuta extracción."}
                 </div>
@@ -923,102 +925,33 @@ export default function App() {
             <div className="flex-1 rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-100">
-                  {toolMode === "sam3" ? "3. Resultado + Hover Highlight" : "3. OCR Resultados (por imagen)"}
+                  {(toolMode as ToolMode) === "sam3" ? "3. Resultado + Hover Highlight" : "3. OCR Resultados (por imagen)"}
                 </h2>
                 <span className="text-[11px] text-slate-500">
-                  {toolMode === "sam3" ? `${labels.length} instancias` : `${ocrResult?.items.length ?? 0} imágenes`}
+                  {(toolMode as ToolMode) === "sam3" ? `${labels.length} instancias` : `${ocrResult?.items.length ?? 0} imágenes`}
                 </span>
               </div>
 
               {/* SAM3 */}
-              {toolMode === "sam3" ? (
-                <div
-                  className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden relative flex items-center justify-center"
-                  onMouseMove={(e) => {
-                    if (!idMapData || !overlayImgRef.current || !idMapW || !idMapH) return;
+              {(toolMode as ToolMode) === "sam3" ? (
+                <div className="flex gap-4 h-full">
+                  <div className="flex-1 min-w-0">
+                    <SegmentViewer
+                      title="SAM3 · Imagen"
+                      file={file}
+                      result={lastResult}
+                      hoverId={hoverId ?? undefined}
+                      onHoverId={setHoverId}
+                      loading={loading}
+                    />
+                  </div>
 
-                    const imgEl = overlayImgRef.current;
-                    const rect = imgEl.getBoundingClientRect();
-
-                    const x = e.clientX - rect.left;
-                    const y = e.clientY - rect.top;
-
-                    if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
-                      if (hoverId !== 0) setHoverId(0);
-                      return;
-                    }
-
-                    const nx = Math.floor((x / rect.width) * idMapW);
-                    const ny = Math.floor((y / rect.height) * idMapH);
-
-                    const idx = ny * idMapW + nx;
-                    const id = idMapData[idx] ?? 0;
-
-                    if (id !== hoverId) setHoverId(id);
-                  }}
-                  onMouseLeave={onOverlayMouseLeave}
-                >
-                  {overlaySrc ? (
-                    <>
-                      <img
-                        ref={overlayImgRef}
-                        src={overlaySrc}
-                        alt="Resultado de segmentación"
-                        className={`max-h-full max-w-full object-contain ${loading ? "blur-[2px] opacity-60" : ""}`}
-                        onLoad={() => syncHoverCanvasToImage()}
-                      />
-
-                      <canvas
-                        ref={hoverCanvasRef}
-                        className="absolute pointer-events-none z-20"
-                        style={{ width: "100%", height: "100%" }}
-                      />
-
-                      {labels.map((lbl) => {
-                        const isActive = hoverId === lbl.id;
-                        return (
-                          <div
-                            key={lbl.id}
-                            className="absolute z-30"
-                            style={{
-                              left: `${clamp01(lbl.cx) * 100}%`,
-                              top: `${clamp01(lbl.cy) * 100}%`,
-                              transform: "translate(-50%, -50%)",
-                            }}
-                          >
-                            <button
-                              type="button"
-                              onMouseEnter={() => setHoverId(lbl.id)}
-                              onMouseLeave={() => setHoverId(0)}
-                              className={`px-2 py-1 rounded-md text-[10px] font-extrabold shadow-lg border transition ${
-                                isActive ? "border-emerald-300/70" : "border-black/60"
-                              }`}
-                              style={{
-                                background: "rgba(0,0,0,0.78)",
-                                color: "white",
-                                boxShadow: isActive
-                                  ? "0 0 0 1px rgba(16,185,129,0.35), 0 0 18px rgba(16,185,129,0.35)"
-                                  : undefined,
-                              }}
-                            >
-                              <span
-                                className="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle"
-                                style={{ background: lbl.color }}
-                              />
-                              ID {lbl.id}
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </>
-                  ) : (
-                    <div className="text-slate-500 text-sm px-6 text-center">
-                      Cuando ejecutes <span className="font-semibold">“Segmentar”</span>, aquí verás la segmentación y
-                      podrás resaltar máscaras con hover (como Meta).
-                    </div>
-                  )}
-
-                  {idMapSrc && <img src={idMapSrc} alt="id_map" className="hidden" />}
+                  <ResultSidePanel
+                    title="Métricas"
+                    result={lastResult}
+                    hoverId={hoverId ?? undefined}
+                    onHoverId={setHoverId}
+                  />
                 </div>
               ) : (
                 // OCR
@@ -1166,7 +1099,7 @@ export default function App() {
               )}
 
               {/* Tabla instancias (SAM3) */}
-              {toolMode === "sam3" && labels.length > 0 && (
+              {(toolMode as ToolMode) === "sam3" && labels.length > 0 && (
                 <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden">
                   <div className="px-4 py-3 bg-slate-900/60 flex items-center justify-between">
                     <span className="text-[11px] font-semibold text-slate-200">Instancias (hover para resaltar)</span>
@@ -1187,8 +1120,8 @@ export default function App() {
                         className={`grid grid-cols-4 px-4 py-2 text-[11px] border-t border-slate-900/60 transition ${
                           hoverId === lbl.id ? "bg-emerald-500/10" : ""
                         }`}
-                        onMouseEnter={() => setHoverId(lbl.id)}
-                        onMouseLeave={() => setHoverId(0)}
+                          onMouseEnter={() => setHoverId(lbl.id)}
+                          onMouseLeave={() => setHoverId(null)}
                       >
                         <span className="font-semibold text-slate-100">#{lbl.id}</span>
                         {/* ✅ FIX: clase por instancia */}
@@ -1205,7 +1138,7 @@ export default function App() {
             </div>
 
             {/* Q4 (solo SAM3) */}
-            {toolMode === "sam3" && (
+            {(toolMode as ToolMode) === "sam3" && (
               <div className="h-[340px] rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
                 <div className="flex items-center justify-between">
                   <h2 className="text-sm font-semibold text-slate-100">4. Conteos + Gráfica</h2>
