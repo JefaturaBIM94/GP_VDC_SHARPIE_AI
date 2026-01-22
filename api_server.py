@@ -68,14 +68,13 @@ class SegmentResponse(BaseModel):
     overlay_image_b64: str = ""  # PNG RGB
 
     id_map_b64: str  # PNG 16-bit: pixel = instance_id (0=fondo)
+    id_map_rgb_b64: str   # <--- NUEVO
 
     # Conteos + labels
     classes_counts: Dict[str, int]
     labels: List[InstanceLabel]
 
-    # Compat (frontend viejo a veces lo usa)
-    class_name: str = ""
-    num_objects: int = 0
+
 
 
 class CompareSegmentResponse(BaseModel):
@@ -103,6 +102,22 @@ def _encode_id_map_16bit_b64(id_map_u16: np.ndarray) -> str:
         id_map_u16 = id_map_u16.astype(np.uint16)
     pil = Image.fromarray(id_map_u16, mode="I;16")
     return _encode_png_b64(pil)
+
+
+def _encode_id_map_rgb_b64(id_map_u16: np.ndarray) -> str:
+    # id_map_u16: uint16 (0 fondo, >0 instancias)
+    if id_map_u16.dtype != np.uint16:
+        id_map_u16 = id_map_u16.astype(np.uint16)
+
+    h, w = id_map_u16.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[..., 0] = (id_map_u16 & 0xFF).astype(np.uint8)
+    rgb[..., 1] = ((id_map_u16 >> 8) & 0xFF).astype(np.uint8)
+    rgb[..., 2] = ((id_map_u16 >> 16) & 0xFF).astype(np.uint8)
+
+    pil = Image.fromarray(rgb, mode="RGB")
+    return _encode_png_b64(pil)
+
 
 
 def _overlay_and_maps(
@@ -189,9 +204,11 @@ def _overlay_and_maps(
     overlay_rgb_b64 = _encode_png_b64(Image.fromarray(img_np))
     overlay_rgba_b64 = _encode_png_b64(Image.fromarray(overlay_rgba, mode="RGBA"))
     id_map_b64 = _encode_id_map_16bit_b64(id_map)
+    id_map_rgb_b64 = _encode_id_map_rgb_b64(id_map)
 
     labels.sort(key=lambda x: (x.class_name, x.id))
-    return overlay_rgb_b64, overlay_rgba_b64, id_map_b64, labels, classes_counts
+    return overlay_rgb_b64, id_map_b64, id_map_rgb_b64, labels, classes_counts
+
 
 
 def _segment_core(image_pil: Image.Image, prompt_csv: str, threshold: float) -> SegmentResponse:
@@ -215,18 +232,18 @@ def _segment_core(image_pil: Image.Image, prompt_csv: str, threshold: float) -> 
 
     session_id = str(uuid.uuid4())
 
-    overlay_rgb_b64, overlay_rgba_b64, id_map_b64, labels, classes_counts = _overlay_and_maps(
+    overlay_rgb_b64, id_map_b64, id_map_rgb_b64, labels, classes_counts = _overlay_and_maps(
         image_pil=image_pil,
         per_prompt_results=per_prompt_results,
         alpha=0.55,
     )
-
     return SegmentResponse(
         session_id=session_id,
         threshold=threshold,
-        overlay_rgba_b64=overlay_rgba_b64 if labels else "",
+        overlay_rgba_b64="",
         overlay_image_b64=overlay_rgb_b64 if labels else "",
         id_map_b64=id_map_b64,
+        id_map_rgb_b64=id_map_rgb_b64,
         classes_counts=classes_counts,
         labels=labels,
         class_name=",".join([p.strip().lower() for p in prompts]),

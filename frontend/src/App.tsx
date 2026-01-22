@@ -10,10 +10,11 @@ import {
   type OcrItem,
   type OcrDetection,
 } from "./api";
+import Sam3CompareView from "./views/Sam3CompareView";
 
 type CountMode = "simple" | "multi";
 type ChartType = "donut" | "pie" | "bubble";
-type ToolMode = "sam3" | "ocr";
+type ToolMode = "sam3" | "sam3_compare" | "ocr";
 
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
@@ -330,8 +331,16 @@ export default function App() {
     setError(null);
     setLoading(false);
 
-    if (m === "sam3") resetOcr();
-    else resetSam3();
+    // OCR es independiente
+    if (m === "ocr") {
+      resetSam3();
+      return;
+    }
+
+    // sam3 y sam3_compare comparten “familia SAM”
+    resetOcr();
+    // opcional: si quieres que SAM3 Compare tenga estado propio,
+    // NO resetees sam3 aquí. Por ahora, lo dejamos así para no confundir.
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -638,7 +647,10 @@ export default function App() {
 
       {/* MAIN GRID */}
       <main className="flex-1 p-5 bg-gradient-to-br from-slate-950 via-black to-slate-950">
-        <div className="grid grid-cols-12 gap-5 h-[calc(100vh-110px)]">
+        {(toolMode as ToolMode) === "sam3_compare" ? (
+          <Sam3CompareView />
+        ) : (
+          <div className="grid grid-cols-12 gap-5 h-[calc(100vh-110px)]">
           {/* Q1 */}
           <section className="col-span-12 lg:col-span-3 h-full rounded-2xl border border-slate-900 bg-slate-950/70 backdrop-blur-md p-5 flex flex-col gap-4">
             <div className="flex items-center justify-between">
@@ -653,19 +665,27 @@ export default function App() {
                 <button
                   onClick={() => onToolModeChange("sam3")}
                   className={`px-3 py-1 rounded-full transition ${
-                    toolMode === "sam3"
-                      ? "bg-emerald-500 text-slate-950"
-                      : "text-slate-400 hover:text-slate-200"
+                    toolMode === "sam3" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
                   SAM3
                 </button>
+
+                <button
+                  onClick={() => onToolModeChange("sam3_compare")}
+                  className={`px-3 py-1 rounded-full transition ${
+                      (toolMode as ToolMode) === "sam3_compare"
+                        ? "bg-emerald-500 text-slate-950"
+                        : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  SAM3 COMPARE
+                </button>
+
                 <button
                   onClick={() => onToolModeChange("ocr")}
                   className={`px-3 py-1 rounded-full transition ${
-                    toolMode === "ocr"
-                      ? "bg-emerald-500 text-slate-950"
-                      : "text-slate-400 hover:text-slate-200"
+                    toolMode === "ocr" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
                   OCR
@@ -1268,7 +1288,8 @@ export default function App() {
               </div>
             )}
           </section>
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );

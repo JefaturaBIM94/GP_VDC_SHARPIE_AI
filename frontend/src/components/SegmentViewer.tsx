@@ -82,11 +82,15 @@ export function SegmentViewer({
   file,
   result,
   loading,
+  hoverId: hoverIdProp,
+  onHoverId,
 }: {
   title: string;
   file: File | null;
   result: SegmentResponse | null;
   loading?: boolean;
+  hoverId?: number;
+  onHoverId?: (id: number) => void;
 }) {
   const originalSrc = useObjectUrl(file);
 
@@ -94,7 +98,12 @@ export function SegmentViewer({
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const hoverCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [hoverId, setHoverId] = useState<number>(0);
+  const [internalHoverId, setInternalHoverId] = useState<number>(0);
+  const hoverId = hoverIdProp ?? internalHoverId;
+  const setHover = (id: number) => {
+    if (typeof onHoverId === "function") onHoverId(id);
+    else setInternalHoverId(id);
+  };
 
   // Decoded id map (uint32 for safety)
   const [idMap, setIdMap] = useState<Uint32Array | null>(null);
@@ -112,7 +121,7 @@ export function SegmentViewer({
 
   const idMapRgbSrc = result?.id_map_rgb_b64 ? `data:image/png;base64,${result.id_map_rgb_b64}` : null;
 
-  // Sync canvas to image displayed size
+  // Sync canvas to image displayed size (pixel-perfect)
   const syncCanvases = () => {
     const img = imgRef.current;
     const c1 = overlayCanvasRef.current;
@@ -123,10 +132,17 @@ export function SegmentViewer({
     const w = Math.max(1, Math.floor(rect.width));
     const h = Math.max(1, Math.floor(rect.height));
 
+    // set drawing buffer size (pixels)
     if (c1.width !== w) c1.width = w;
     if (c1.height !== h) c1.height = h;
     if (c2.width !== w) c2.width = w;
     if (c2.height !== h) c2.height = h;
+
+    // set CSS size to match rendered image exactly
+    c1.style.width = `${w}px`;
+    c1.style.height = `${h}px`;
+    c2.style.width = `${w}px`;
+    c2.style.height = `${h}px`;
   };
 
   useEffect(() => {
@@ -137,7 +153,7 @@ export function SegmentViewer({
 
   // Load id_map_rgb and decode to Uint32Array
   useEffect(() => {
-    setHoverId(0);
+    setHover(0);
     setIdMap(null);
     setEdgesById(null);
     setMapW(0);
@@ -257,7 +273,7 @@ export function SegmentViewer({
     const y = e.clientY - rect.top;
 
     if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
-      if (hoverId !== 0) setHoverId(0);
+      if (hoverId !== 0) setHover(0);
       return;
     }
 
@@ -265,7 +281,7 @@ export function SegmentViewer({
     const ny = Math.floor((y / rect.height) * mapH);
 
     const id = idMap[ny * mapW + nx] ?? 0;
-    if (id !== hoverId) setHoverId(id);
+                    if (id !== hoverId) setHover(id);
   };
 
   return (
@@ -278,32 +294,46 @@ export function SegmentViewer({
       <div className="p-3 flex-1">
         <div
           className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden relative flex items-center justify-center"
-          onMouseMove={onMouseMove}
-          onMouseLeave={() => setHoverId(0)}
         >
           {originalSrc ? (
-            <>
+            <div className="relative inline-block" onMouseMove={onMouseMove} onMouseLeave={() => setHover(0)}>
               <img
                 ref={imgRef}
                 src={originalSrc}
                 alt={title}
-                className={`max-h-[520px] w-auto object-contain ${loading ? "blur-[2px] opacity-60" : ""}`}
                 onLoad={() => syncCanvases()}
+                style={{ display: "block", maxWidth: "100%", height: "auto" }}
+                className={`${loading ? "blur-[2px] opacity-60" : ""}`}
               />
 
               {/* overlay masks */}
               <canvas
                 ref={overlayCanvasRef}
-                className="absolute pointer-events-none z-10"
-                style={{ width: "100%", height: "100%" }}
+                className="absolute left-0 top-0 pointer-events-none z-10"
+                style={{ left: 0, top: 0 }}
               />
 
               {/* hover highlight */}
               <canvas
                 ref={hoverCanvasRef}
-                className="absolute pointer-events-none z-20"
-                style={{ width: "100%", height: "100%" }}
+                className="absolute left-0 top-0 pointer-events-none z-20"
+                style={{ left: 0, top: 0 }}
               />
+
+              {loading && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/35 backdrop-blur-[1px]">
+                  <div className="w-[70%] rounded-xl border border-slate-900 bg-black/50 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] text-slate-300">Rendering</span>
+                      <span className="text-[11px] text-slate-500">SAM3</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
+                      <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
+                    </div>
+                    <div className="mt-2 text-[11px] text-slate-500">Aplicando máscaras y preparando hover map…</div>
+                  </div>
+                </div>
+              )}
 
               {/* chips ID (opcional) */}
               {labels.map((lbl) => {
@@ -320,8 +350,8 @@ export function SegmentViewer({
                   >
                     <button
                       type="button"
-                      onMouseEnter={() => setHoverId(lbl.id)}
-                      onMouseLeave={() => setHoverId(0)}
+                      onMouseEnter={() => setHover(lbl.id)}
+                      onMouseLeave={() => setHover(0)}
                       className={`px-2 py-1 rounded-md text-[10px] font-extrabold shadow-lg border transition ${
                         isActive ? "border-emerald-300/70" : "border-black/60"
                       }`}
@@ -342,7 +372,7 @@ export function SegmentViewer({
                   </div>
                 );
               })}
-            </>
+            </div>
           ) : (
             <div className="text-slate-500 text-sm px-6 py-10 text-center">
               Sube una imagen para visualizar.

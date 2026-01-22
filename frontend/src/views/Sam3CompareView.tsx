@@ -2,6 +2,7 @@
 import React, { useMemo, useState } from "react";
 import { segmentImage, type SegmentResponse } from "../api";
 import { SegmentViewer } from "../components/SegmentViewer";
+import ResultSidePanel from "../components/ResultSidePanel";
 
 export function Sam3CompareView() {
   const [fileA, setFileA] = useState<File | null>(null);
@@ -15,6 +16,8 @@ export function Sam3CompareView() {
 
   const [resA, setResA] = useState<SegmentResponse | null>(null);
   const [resB, setResB] = useState<SegmentResponse | null>(null);
+  const [hoverIdA, setHoverIdA] = useState<number>(0);
+  const [hoverIdB, setHoverIdB] = useState<number>(0);
 
   const countsA = useMemo(() => resA?.classes_counts ?? {}, [resA]);
   const countsB = useMemo(() => resB?.classes_counts ?? {}, [resB]);
@@ -103,6 +106,19 @@ export function Sam3CompareView() {
               {loading ? "Corriendo compare..." : "Run SAM3 Compare"}
             </button>
 
+            {loading && (
+              <div className="mt-3 rounded-xl border border-slate-900 bg-black/40 p-3 render-noise">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px] text-slate-300">Processing</span>
+                  <span className="text-[11px] text-slate-500">SAM3 COMPARE</span>
+                </div>
+                <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
+                  <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500">Segmentando máscaras + generando overlay…</p>
+              </div>
+            )}
+
             <div className="text-[11px] text-slate-400">
               Total A: <span className="text-slate-200 font-semibold">{totalA}</span>{" "}
               · Total B: <span className="text-slate-200 font-semibold">{totalB}</span>
@@ -120,12 +136,41 @@ export function Sam3CompareView() {
       {/* Split view */}
       <div className="grid grid-cols-12 gap-4">
         <div className="col-span-12 lg:col-span-6">
-          <SegmentViewer title="SAM3 Compare · Imagen A" file={fileA} result={resA} loading={loading} />
+          <div className="flex gap-4 h-full">
+            <div className="flex-1 min-w-0">
+              <SegmentViewer
+                title="SAM3 Compare · Imagen A"
+                file={fileA}
+                result={resA}
+                hoverId={hoverIdA}
+                onHoverId={setHoverIdA}
+                loading={loading}
+              />
+            </div>
+
+            <ResultSidePanel title="Métricas A" result={resA} hoverId={hoverIdA} onHoverId={setHoverIdA} />
+          </div>
         </div>
+
         <div className="col-span-12 lg:col-span-6">
-          <SegmentViewer title="SAM3 Compare · Imagen B" file={fileB} result={resB} loading={loading} />
+          <div className="flex gap-4 h-full">
+            <div className="flex-1 min-w-0">
+              <SegmentViewer
+                title="SAM3 Compare · Imagen B"
+                file={fileB}
+                result={resB}
+                hoverId={hoverIdB}
+                onHoverId={setHoverIdB}
+                loading={loading}
+              />
+            </div>
+
+            <ResultSidePanel title="Métricas B" result={resB} hoverId={hoverIdB} onHoverId={setHoverIdB} />
+          </div>
         </div>
       </div>
     </div>
   );
 }
+
+export default Sam3CompareView;
