@@ -19,21 +19,20 @@ body {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-/* --- Animación barra de render "V-Ray style" --- */
-@keyframes loading-bar {
-  0% {
-    transform: translateX(-60%);
-  }
-  50% {
-    transform: translateX(0%);
-  }
-  100% {
-    transform: translateX(120%);
-  }
+/* --- Animación barra de render (shimmer / gradient) --- */
+.loading-bar-inner {
+  background: linear-gradient(90deg, rgba(16,185,129,0.12), rgba(16,185,129,0.88), rgba(16,185,129,0.12));
+  background-size: 200% 100%;
+  animation: shimmer 1.1s linear infinite;
 }
 
-.loading-bar-inner {
-  animation: loading-bar 1.2s ease-in-out infinite;
+@keyframes shimmer {
+  0% {
+    background-position: 0% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 
 /* Opcional: un ligero ruido de fondo para el panel de render */

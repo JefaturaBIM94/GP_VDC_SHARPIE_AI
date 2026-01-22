@@ -1,0 +1,15 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+
+numpy==1.26.4
+pillow==10.4.0
+
+opencv-python==4.10.0.84
+easyocr==1.7.1
+
+# EasyOCR depende de torch. En Windows conviene fijarlo.
+torch==2.3.1
+torchvision==0.18.1
+
+python-multipart==0.0.9

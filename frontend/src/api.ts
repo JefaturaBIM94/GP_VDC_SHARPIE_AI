@@ -2,54 +2,80 @@
 
 export type InstanceLabel = {
   id: number;
-  class_name: string;      // clase a la que pertenece
-  cx: number;              // [0..1]
-  cy: number;              // [0..1]
+  class_name: string;
+  cx: number; // [0,1]
+  cy: number; // [0,1]
   score: number;
-  area_px: number;         // área en pixeles (backend)
-  color: string;           // "#rrggbb"
+  area_px: number;
+  color: string; // "#rrggbb"
 };
 
 export type SegmentResponse = {
   session_id: string;
-
-  // === datos principales ===
-  class_name: string;
-  num_objects: number;
   threshold: number;
 
-  // === imágenes ===
+  // Mantengo por compatibilidad (tu backend aún lo manda)
   overlay_image_b64: string;
 
-  // === analytics ===
+  // Legacy (16-bit PNG). NO confiable para hover si ids > 255.
+  id_map_b64: string;
+
+  // Nuevo (RGB 24-bit). Recomendado para hover/overlay.
+  id_map_rgb_b64: string;
+
   classes_counts: Record<string, number>;
-
-  // === instancias ===
   labels: InstanceLabel[];
-
-  // === FUTURO (NO rompe nada aunque no exista aún) ===
-  id_map_b64?: string;     // opcional (hover highlight por pixel)
 };
 
-export async function segmentImage(
-  file: File,
-  prompt: string,
-  threshold: number
-): Promise<SegmentResponse> {
-  const form = new FormData();
-  form.append("image", file);
-  form.append("prompt", prompt);
-  form.append("threshold", String(threshold));
+export type OcrDetection = {
+  text: string;
+  clean: string;
+  conf: number;
+  bbox: number[][];
+};
 
-  const res = await fetch("http://127.0.0.1:8000/api/segment", {
-    method: "POST",
-    body: form,
-  });
+export type OcrItem = {
+  filename: string;
+  raw_text: string;
+  codes: string[];
+  detections: OcrDetection[];
+  preview_b64?: string;
+  debug?: any;
+};
 
+export type OcrBatchResponse = {
+  items: OcrItem[];
+  unique_codes: string[];
+};
+
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE_URL?.toString()?.trim() ||
+  "http://127.0.0.1:8000";
+
+// -------------------- SAM3 --------------------
+export async function segmentImage(file: File, prompt: string, threshold: number): Promise<SegmentResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("prompt", prompt);
+  fd.append("threshold", String(threshold));
+
+  const res = await fetch(`${API_BASE}/api/segment`, { method: "POST", body: fd });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} ${res.statusText} - ${text}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`segmentImage failed: ${res.status} ${txt}`);
   }
+  return (await res.json()) as SegmentResponse;
+}
 
-  return res.json();
+// -------------------- OCR --------------------
+export async function ocrBatch(files: File[]): Promise<OcrBatchResponse> {
+  const fd = new FormData();
+  for (const f of files) fd.append("images", f);
+
+  const res = await fetch(`${API_BASE}/api/ocr-batch`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`ocrBatch failed: ${res.status} ${txt}`);
+  }
+  return (await res.json()) as OcrBatchResponse;
 }
