@@ -160,14 +160,20 @@ class ReconEngine:
         depth = self.predict_depth(image_pil)
         depth_b64 = self.depth_to_png_b64(depth)
 
+        # meta: incluir tamaño usado para generar depth/pointcloud
+        h, w = depth.shape[:2]
+        meta = {
+            "depth_kind": "relative",
+            "note": "DepthAnythingV2 outputs relative depth (scale not metric).",
+            "w": int(w),
+            "h": int(h),
+        }
+
         # por ahora: SOLO depth (para que ya lo veas). PLY lo hacemos en el siguiente paso.
         return {
             "depth_map_b64": depth_b64,
             "ply_b64": "",
-            "meta": {
-                "depth_kind": "relative",
-                "note": "DepthAnythingV2 outputs relative depth (scale not metric)."
-            },
+            "meta": meta,
         }
 
 

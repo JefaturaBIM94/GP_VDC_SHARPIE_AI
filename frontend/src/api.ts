@@ -84,8 +84,11 @@ export async function ocrBatch(files: File[]): Promise<OcrBatchResponse> {
 export type FastReconResponse = {
   depth_png_b64: string;
   ply_b64?: string | null;
-  width: number;
-  height: number;
+  meta?: {
+    w?: number;
+    h?: number;
+    [key: string]: any;
+  };
 };
 
 export async function reconstructFast(file: File, makePly: boolean = true): Promise<FastReconResponse> {
