@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from sam3_engine import Sam3Engine
+from backend.reconstruction.routes import router as reconstruction_router
 
 # OCR
 import cv2
@@ -37,6 +38,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register reconstruction routes (reconstruct-fast)
+app.include_router(reconstruction_router)
 
 engine = Sam3Engine()
 

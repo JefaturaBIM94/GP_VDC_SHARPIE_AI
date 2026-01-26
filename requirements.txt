@@ -13,3 +13,8 @@ torch==2.3.1
 torchvision==0.18.1
 
 python-multipart==0.0.9
+
+# ---- Depth Anything v2 (Fast Reconstruction) ----
+timm==1.0.9
+huggingface-hub==0.24.6
+safetensors==0.4.4

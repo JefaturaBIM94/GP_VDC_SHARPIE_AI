@@ -11,12 +11,13 @@ import {
   type OcrDetection,
 } from "./api";
 import Sam3CompareView from "./views/Sam3CompareView";
+import FastReconstructionView from "./views/FastReconstructionView";
 import { SegmentViewer } from "./components/SegmentViewer";
 import ResultSidePanel from "./components/ResultSidePanel";
 
 type CountMode = "simple" | "multi";
 type ChartType = "donut" | "pie" | "bubble";
-type ToolMode = "sam3" | "sam3_compare" | "ocr";
+type ToolMode = "sam3" | "sam3_compare" | "ocr" | "fast_recon";
 
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
@@ -206,6 +207,75 @@ function BubbleChart({
 
 /** ======= MAIN APP ======= */
 export default function App() {
+  // DEBUG flag — set VITE_DEBUG=1 to enable verbose frontend SAM3 logs
+  const DEBUG = ((import.meta as any).env?.VITE_DEBUG ?? "0") === "1";
+
+  // Helper: decode id_map_rgb_b64 exactly like SegmentViewer does
+  async function decodeIdMapRgbB64(b64: string) {
+    return new Promise<{ ids: Uint32Array; w: number; h: number }>((resolve, reject) => {
+      try {
+        const img = new Image();
+        img.onload = () => {
+          const w = img.naturalWidth;
+          const h = img.naturalHeight;
+          const c = document.createElement("canvas");
+          c.width = w;
+          c.height = h;
+          const ctx = c.getContext("2d", { willReadFrequently: true });
+          if (!ctx) return reject(new Error("Canvas context unavailable"));
+          ctx.drawImage(img, 0, 0);
+          const data = ctx.getImageData(0, 0, w, h).data;
+
+          const ids = new Uint32Array(w * h);
+          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            ids[p] = r + (g << 8) + (b << 16);
+          }
+
+          resolve({ ids, w, h });
+        };
+        img.onerror = () => reject(new Error("Failed to load id_map image"));
+        img.src = `data:image/png;base64,${b64}`;
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  // Helper: map client coords to id-map coords accounting for object-fit:contain letterbox offsets
+  function mapClientToIdCoords(
+    imgEl: HTMLImageElement | null,
+    clientX: number,
+    clientY: number,
+    mapW: number,
+    mapH: number
+  ): { nx: number; ny: number } | null {
+    if (!imgEl) return null;
+    const rect = imgEl.getBoundingClientRect();
+    const naturalW = imgEl.naturalWidth || 0;
+    const naturalH = imgEl.naturalHeight || 0;
+    if (!naturalW || !naturalH) return null;
+
+    // compute display size of the image inside the rect when object-fit: contain is used
+    const scale = Math.min(rect.width / naturalW, rect.height / naturalH);
+    const dispW = naturalW * scale;
+    const dispH = naturalH * scale;
+    const offsetX = (rect.width - dispW) / 2;
+    const offsetY = (rect.height - dispH) / 2;
+
+    const xInImage = clientX - rect.left - offsetX;
+    const yInImage = clientY - rect.top - offsetY;
+    if (xInImage < 0 || yInImage < 0 || xInImage > dispW || yInImage > dispH) return null;
+
+    const nx = Math.floor((xInImage / dispW) * mapW);
+    const ny = Math.floor((yInImage / dispH) * mapH);
+    return { nx, ny };
+  }
+
+  // expose mapping helper in DEBUG for interactive testing in console
+  
   // Tool selector
   const [toolMode, setToolMode] = useState<ToolMode>("sam3");
 
@@ -213,6 +283,40 @@ export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState("columns");
   const [threshold, setThreshold] = useState(0.5);
+
+  // DEBUG mapping test
+  const [debugMappingActive, setDebugMappingActive] = useState(false);
+  const [debugIdMap, setDebugIdMap] = useState<{ ids: Uint32Array; w: number; h: number } | null>(null);
+  const [debugHover, setDebugHover] = useState<{ id: number; nx: number; ny: number } | null>(null);
+
+  // expose mapping helper in DEBUG for interactive testing in console
+  useEffect(() => {
+    if (!DEBUG) return;
+    (window as any).__sam3_mapClientToIdCoords = mapClientToIdCoords;
+
+    const onMove = (e: MouseEvent) => {
+      if (!debugMappingActive) return;
+      const imgEl = document.querySelector('img[alt^="SAM3"]') as HTMLImageElement | null;
+      if (!imgEl || !debugIdMap) return;
+      const coords = mapClientToIdCoords(imgEl, e.clientX, e.clientY, debugIdMap.w, debugIdMap.h);
+      if (!coords) {
+        setDebugHover(null);
+        return;
+      }
+      const idx = coords.ny * debugIdMap.w + coords.nx;
+      const id = debugIdMap.ids[idx] ?? 0;
+      setDebugHover({ id, nx: coords.nx, ny: coords.ny });
+    };
+
+    window.addEventListener("mousemove", onMove);
+
+    return () => {
+      try {
+        delete (window as any).__sam3_mapClientToIdCoords;
+      } catch {}
+      window.removeEventListener("mousemove", onMove);
+    };
+  }, [DEBUG, debugMappingActive, debugIdMap]);
 
   const [mode, setMode] = useState<CountMode>("simple");
   const [chartType, setChartType] = useState<ChartType>("donut");
@@ -320,6 +424,28 @@ export default function App() {
     try {
       const data = await segmentImage(file, prompt, threshold);
       setLastResult(data);
+
+      if (DEBUG) {
+        console.debug("[SAM3 DEBUG] segmentImage response:", {
+          session_id: data.session_id,
+          labels: (data.labels ?? []).length,
+          has_overlay: !!data.overlay_image_b64,
+          has_id_map_rgb: !!data.id_map_rgb_b64,
+        });
+
+        // decode id_map_rgb_b64 for quick inspection (same method as SegmentViewer)
+        if (data.id_map_rgb_b64) {
+          decodeIdMapRgbB64(data.id_map_rgb_b64)
+            .then(({ ids, w, h }) => {
+              const unique = new Set<number>();
+              for (let i = 0; i < Math.min(ids.length, 5000); i++) unique.add(ids[i]);
+              console.debug("[SAM3 DEBUG] id_map_rgb sample:", { w, h, sample_unique_approx: unique.size });
+              // store for interactive debug mapping if requested
+              setDebugIdMap({ ids, w, h });
+            })
+            .catch((e) => console.warn("[SAM3 DEBUG] id_map decode failed", e));
+        }
+      }
 
       if ((data.labels?.length ?? 0) > 0) {
         setHistory((prev) => (mode === "simple" ? [data] : [...prev, data]));
@@ -480,6 +606,14 @@ export default function App() {
 
           <button
             type="button"
+            onClick={() => onToolModeChange("fast_recon")}
+            className={`px-4 py-2 rounded-xl border ${toolMode === "fast_recon" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
+          >
+            Fast Reconstruction
+          </button>
+
+          <button
+            type="button"
             onClick={() => onToolModeChange("sam3_compare")}
             className={`px-4 py-2 rounded-xl border ${toolMode === "sam3_compare" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
           >
@@ -490,6 +624,8 @@ export default function App() {
         {/* Contenido */}
         {toolMode === "sam3_compare" ? (
           <Sam3CompareView />
+        ) : toolMode === "fast_recon" ? (
+          <FastReconstructionView />
         ) : toolMode === "sam3" ? (
           <div className="grid grid-cols-12 gap-4 h-[calc(100vh-110px)]">
             {/* Panel Izquierdo: controles compactos */}
@@ -672,6 +808,15 @@ export default function App() {
                 </button>
 
                 <button
+                  onClick={() => onToolModeChange("fast_recon")}
+                  className={`px-3 py-1 rounded-full transition ${
+                    (toolMode as ToolMode) === "fast_recon" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  FAST RECON
+                </button>
+
+                <button
                   onClick={() => onToolModeChange("ocr")}
                   className={`px-3 py-1 rounded-full transition ${
                     (toolMode as ToolMode) === "ocr" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
@@ -695,6 +840,22 @@ export default function App() {
                 onChange={onFileChange}
                 className="block w-full text-[11px] file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-500 file:text-slate-950 hover:file:bg-emerald-400 cursor-pointer"
               />
+                {DEBUG && (toolMode as ToolMode) === "sam3" && (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setDebugMappingActive((v) => !v);
+                      }}
+                      className={`mt-2 w-full inline-flex items-center justify-center rounded-md px-3 py-2 text-[12px] font-semibold ${
+                        debugMappingActive ? "bg-emerald-500 text-slate-900" : "bg-slate-800 text-slate-200"
+                      }`}
+                      title="Toggle DEBUG mapping (requires id_map_rgb_b64)"
+                    >
+                      {debugMappingActive ? "DEBUG: Mapping ON" : "DEBUG: Mapping OFF"}
+                    </button>
+                  </div>
+                )}
               {(toolMode as ToolMode) === "ocr" && (
                 <div className="text-[11px] text-slate-500">
                   Cargadas: <span className="text-slate-200 font-semibold">{ocrFiles.length}</span> / 10

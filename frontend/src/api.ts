@@ -79,3 +79,29 @@ export async function ocrBatch(files: File[]): Promise<OcrBatchResponse> {
   }
   return (await res.json()) as OcrBatchResponse;
 }
+
+
+export type FastReconResponse = {
+  depth_png_b64: string;
+  ply_b64?: string | null;
+  width: number;
+  height: number;
+};
+
+export async function reconstructFast(file: File, makePly: boolean = true): Promise<FastReconResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("make_ply", String(makePly));
+
+  const res = await fetch(`${API_BASE}/api/reconstruct-fast`, {
+    method: "POST",
+    body: fd,
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`reconstructFast failed: ${res.status} ${txt}`);
+  }
+
+  return (await res.json()) as FastReconResponse;
+}
