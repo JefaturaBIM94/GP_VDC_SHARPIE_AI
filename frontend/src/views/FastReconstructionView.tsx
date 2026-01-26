@@ -59,8 +59,9 @@ export default function FastReconstructionView() {
     setLoading(true);
     try {
       const data = await reconstructFast(file, makePly);
-      setResult(data);
-      setPlyB64(data.ply_b64 || "");
+    setResult(data);
+    console.log("FAST RECON meta:", data.meta);
+    setPlyB64(data.ply_b64 || "");
     } catch (e) {
       console.error(e);
       setError("Error llamando al backend. Verifica /api/reconstruct-fast en Uvicorn.");
@@ -225,6 +226,8 @@ export default function FastReconstructionView() {
                   scalarField={pcScalar}
                   downsample={pcDownsample}
                   pointSize={pointSize}
+                  originalImageSrc={originalSrc ?? undefined}
+                  meta={result?.meta}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-xs text-white/60">

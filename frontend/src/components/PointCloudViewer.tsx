@@ -11,6 +11,8 @@ type Props = {
   colorMode?: "rgb" | "scalar";
   scalarField?: "z" | "depth";
   downsample?: number;
+  originalImageSrc?: string | undefined;
+  meta?: any;
 };
 
 function b64ToBlobUrl(b64: string, mime = "application/octet-stream") {
@@ -19,7 +21,7 @@ function b64ToBlobUrl(b64: string, mime = "application/octet-stream") {
   return URL.createObjectURL(blob);
 }
 
-function PointsFromPLY({ url, pointSize }: { url: string; pointSize: number }) {
+function PointsFromPLY({ url, pointSize, colorMode, scalarField, downsample, imgData, meta }: { url: string; pointSize: number; colorMode?: "rgb" | "scalar"; scalarField?: "z" | "depth"; downsample?: number; imgData?: ImageData | null; meta?: any }) {
   const [geom, setGeom] = useState<THREE.BufferGeometry | null>(null);
 
   useEffect(() => {
@@ -30,6 +32,34 @@ function PointsFromPLY({ url, pointSize }: { url: string; pointSize: number }) {
       (g) => {
         if (!alive) return;
         g.computeVertexNormals?.();
+
+        try {
+          // If requested, override vertex colors using the provided imgData and meta (row-major mapping)
+          if (colorMode === "rgb" && imgData && meta) {
+            const pos = g.getAttribute("position");
+            const count = pos.count;
+            const w = meta.w ?? meta.width;
+            const h = meta.h ?? meta.height;
+            if (w && h && w * h >= count) {
+              const cols = new Float32Array(count * 3);
+              for (let i = 0; i < count; i++) {
+                const px = i % w;
+                const py = Math.floor(i / w);
+                const idx = (py * w + px) * 4;
+                const r = imgData.data[idx] / 255.0;
+                const gcol = imgData.data[idx + 1] / 255.0;
+                const b = imgData.data[idx + 2] / 255.0;
+                cols[i * 3 + 0] = r;
+                cols[i * 3 + 1] = gcol;
+                cols[i * 3 + 2] = b;
+              }
+              g.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to apply projected RGB colors:", err);
+        }
+
         setGeom(g);
       },
       undefined,
@@ -40,7 +70,7 @@ function PointsFromPLY({ url, pointSize }: { url: string; pointSize: number }) {
     return () => {
       alive = false;
     };
-  }, [url]);
+  }, [url, colorMode, scalarField, downsample, imgData, meta]);
 
   const material = useMemo(() => {
     return new THREE.PointsMaterial({
@@ -79,6 +109,8 @@ export const PointCloudViewer: React.FC<Props> = ({
   colorMode = "rgb",
   scalarField = "z",
   downsample = 1,
+  originalImageSrc,
+  meta,
 }) => {
   const url = useMemo(() => {
     if (!plyB64) return null;
@@ -90,6 +122,46 @@ export const PointCloudViewer: React.FC<Props> = ({
       if (url) URL.revokeObjectURL(url);
     };
   }, [url]);
+
+  // Load original image into ImageData (resized to meta.w/meta.h) for projected RGB sampling
+  const [imgData, setImgData] = useState<ImageData | null>(null);
+  useEffect(() => {
+    if (!originalImageSrc || !meta) {
+      setImgData(null);
+      return;
+    }
+    const w = meta.w ?? meta.width ?? null;
+    const h = meta.h ?? meta.height ?? null;
+    if (!w || !h) {
+      setImgData(null);
+      return;
+    }
+
+    let alive = true;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      if (!alive) return;
+      try {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d");
+        if (!ctx) return setImgData(null);
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h);
+        setImgData(data);
+      } catch (err) {
+        console.error("Failed to create image data for original image:", err);
+        setImgData(null);
+      }
+    };
+    img.onerror = () => setImgData(null);
+    img.src = originalImageSrc;
+    return () => {
+      alive = false;
+    };
+  }, [originalImageSrc, meta]);
 
   if (!url) {
     return (
@@ -104,7 +176,7 @@ export const PointCloudViewer: React.FC<Props> = ({
       <Canvas camera={{ position: [0, 0, 2.5], near: 0.01, far: 5000 }}>
         <ambientLight intensity={0.9} />
         <OrbitControls makeDefault />
-        <PointsFromPLY url={url} pointSize={pointSize} />
+        <PointsFromPLY url={url} pointSize={pointSize} colorMode={colorMode} scalarField={scalarField} downsample={downsample} imgData={imgData} meta={meta} />
       </Canvas>
     </div>
   );
