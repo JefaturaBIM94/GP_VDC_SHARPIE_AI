@@ -36,6 +36,11 @@ export default function FastReconstructionView() {
   const [pcDownsample, setPcDownsample] = useState<number>(1);
   const [pointSize, setPointSize] = useState<number>(0.01);
 
+  // New controls: point size, real decimation (stride) and style
+  const [pcPointSize, setPcPointSize] = useState<number>(0.015);
+  const [pcStride, setPcStride] = useState<number>(2);
+  const [pcStyle, setPcStyle] = useState<"points" | "spheres">("points");
+
   const originalSrc = useObjectUrl(file);
 
   const depthSrc = useMemo(() => {
@@ -150,84 +155,88 @@ export default function FastReconstructionView() {
       </div>
 
       {/* Viewers */}
-      <div className="grid grid-cols-12 gap-4 flex-1">
-        <div className="col-span-12 lg:col-span-6 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center">
-          {originalSrc ? (
-            <img src={originalSrc} alt="Original" className="max-h-full max-w-full object-contain" />
-          ) : (
-            <div className="text-slate-500 text-sm px-6 text-center">Sube una imagen para generar reconstrucción.</div>
-          )}
+      <div className="grid grid-cols-12 gap-4 flex-1 min-h-0">
+        {/* LEFT 50%: Original + Depth side-by-side */}
+        <div className="col-span-12 lg:col-span-6 min-h-0">
+          <div className="grid grid-cols-2 gap-4 h-full min-h-0">
+            <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center min-h-0">
+              {originalSrc ? (
+                <img src={originalSrc} alt="Original" className="h-full w-full object-contain" />
+              ) : (
+                <div className="text-slate-500 text-sm px-6 text-center">Sube una imagen.</div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center min-h-0">
+              {depthSrc ? (
+                <img src={depthSrc} alt="Depth" className="h-full w-full object-contain" />
+              ) : (
+                <div className="text-slate-500 text-sm px-6 text-center">Aquí aparecerá el depth map.</div>
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="col-span-12 lg:col-span-6 flex flex-col gap-3">
-          <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex-1 flex items-center justify-center">
-            {depthSrc ? (
-              <img src={depthSrc} alt="Depth" className="max-h-full max-w-full object-contain" />
-            ) : (
-              <div className="text-slate-500 text-sm px-6 text-center">Aquí aparecerá el depth map.</div>
-            )}
-          </div>
+        {/* RIGHT 50%: Point Cloud viewer full */}
+        <div className="col-span-12 lg:col-span-6 min-h-0">
+          <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden h-full min-h-0 flex flex-col">
+            {/* header/controls */}
+            <div className="p-3 border-b border-slate-900 flex items-center justify-between">
+              <div className="text-sm font-semibold text-slate-100">Point Cloud</div>
+              {/* deja aquí tus controles actuales (RGB/Scalar/Downsample/PointSize) */}
+            </div>
 
-          {/* === Point Cloud Panel (debajo del Depth Map) === */}
-          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold">Point Cloud</h3>
-
-              <div className="flex items-center gap-3 text-xs">
-                <label className="flex items-center gap-1">
+            <div className="p-3">
+              <div className="mt-2 grid grid-cols-12 gap-3 text-xs text-white/80">
+                <label className="col-span-6 flex flex-col gap-1">
+                  <span>Point size: {pcPointSize.toFixed(3)}</span>
                   <input
-                    type="radio"
-                    checked={pcColorMode === "rgb"}
-                    onChange={() => setPcColorMode("rgb")}
+                    type="range"
+                    min={0.002}
+                    max={0.08}
+                    step={0.001}
+                    value={pcPointSize}
+                    onChange={(e) => setPcPointSize(parseFloat(e.target.value))}
                   />
-                  RGB
                 </label>
 
-                <label className="flex items-center gap-1">
+                <label className="col-span-6 flex flex-col gap-1">
+                  <span>Decimation (stride): {pcStride}</span>
                   <input
-                    type="radio"
-                    checked={pcColorMode === "scalar"}
-                    onChange={() => setPcColorMode("scalar")}
+                    type="range"
+                    min={1}
+                    max={12}
+                    step={1}
+                    value={pcStride}
+                    onChange={(e) => setPcStride(parseInt(e.target.value, 10))}
                   />
-                  Scalar
                 </label>
 
-                <select
-                  className="rounded bg-black/30 px-2 py-1"
-                  value={pcScalar}
-                  onChange={(e) => setPcScalar(e.target.value as any)}
-                  disabled={pcColorMode !== "scalar"}
-                >
-                  <option value="z">Height (Z)</option>
-                  <option value="depth">Depth</option>
-                </select>
-
-                <label className="flex items-center gap-2">
-                  Downsample
+                <label className="col-span-6 flex items-center gap-2">
+                  <span>Style</span>
                   <select
                     className="rounded bg-black/30 px-2 py-1"
-                    value={pcDownsample}
-                    onChange={(e) => setPcDownsample(parseInt(e.target.value, 10))}
+                    value={pcStyle}
+                    onChange={(e) => setPcStyle(e.target.value as any)}
                   >
-                    <option value={1}>1x</option>
-                    <option value={2}>2x</option>
-                    <option value={4}>4x</option>
-                    <option value={8}>8x</option>
+                    <option value="points">Points</option>
+                    <option value="spheres">Spheres (heavy)</option>
                   </select>
                 </label>
               </div>
             </div>
 
-            <div className="h-[420px] w-full overflow-hidden rounded-md bg-black">
+            {/* viewer */}
+            <div className="flex-1 min-h-0">
               {plyB64 ? (
                 <PointCloudViewer
                   plyB64={plyB64}
                   colorMode={pcColorMode}
                   scalarField={pcScalar}
                   downsample={pcDownsample}
-                  pointSize={pointSize}
-                  originalImageSrc={originalSrc ?? undefined}
-                  meta={result?.meta}
+                  pointSize={pcPointSize}
+                  stride={pcStride}
+                  style={pcStyle}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-xs text-white/60">
