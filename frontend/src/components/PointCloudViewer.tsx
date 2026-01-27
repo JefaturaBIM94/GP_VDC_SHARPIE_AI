@@ -163,21 +163,22 @@ export const PointCloudViewer: React.FC<Props> = ({
     };
   }, [originalImageSrc, meta]);
 
-  if (!url) {
-    return (
-      <div className="w-full rounded border border-slate-700 p-4 text-slate-300">
-        No hay point cloud aún. Ejecuta “Fast Reconstruction” con make_ply=true.
-      </div>
-    );
-  }
-
   return (
     <div className="w-full rounded border border-slate-700 overflow-hidden" style={{ height }}>
       <Canvas camera={{ position: [0, 0, 2.5], near: 0.01, far: 5000 }}>
         <ambientLight intensity={0.9} />
+        <gridHelper args={[10, 10]} />
+        <axesHelper args={[1]} />
+
+        {url && (
+          <PointsFromPLY url={url} pointSize={pointSize} colorMode={colorMode} scalarField={scalarField} downsample={downsample} imgData={imgData} meta={meta} />
+        )}
+
         <OrbitControls makeDefault />
-        <PointsFromPLY url={url} pointSize={pointSize} colorMode={colorMode} scalarField={scalarField} downsample={downsample} imgData={imgData} meta={meta} />
       </Canvas>
+      {!url && (
+        <div className="p-2 text-sm text-slate-400">No hay point cloud aún. Ejecuta “Fast Reconstruction” con make_ply=true.</div>
+      )}
     </div>
   );
 };

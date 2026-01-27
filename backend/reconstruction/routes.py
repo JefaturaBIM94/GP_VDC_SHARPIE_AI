@@ -15,8 +15,7 @@ _engine = DepthAnythingEngine()
 class FastReconResponse(BaseModel):
     depth_png_b64: str
     ply_b64: Optional[str] = None
-    width: int
-    height: int
+    meta: Optional[dict] = None
 
 
 @router.post("/api/reconstruct-fast", response_model=FastReconResponse)
@@ -29,10 +28,9 @@ async def reconstruct_fast(
 
     result = _engine.reconstruct_fast(image_pil=image_pil, make_ply=make_ply)
 
-    # result is expected to be a dict produced by the engine
-    return FastReconResponse(
-        depth_png_b64=result.get("depth_png_b64", result.get("depth_map_b64", "")),
-        ply_b64=result.get("ply_b64", ""),
-        width=image_pil.size[0],
-        height=image_pil.size[1],
-    )
+    # Map engine keys to API response (frontend expects depth_png_b64 and meta)
+    return {
+        "depth_png_b64": result.get("depth_map_b64", result.get("depth_png_b64", "")),
+        "ply_b64": result.get("ply_b64", ""),
+        "meta": result.get("meta", {}),
+    }
