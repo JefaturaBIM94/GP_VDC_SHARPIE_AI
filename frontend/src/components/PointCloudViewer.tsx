@@ -1,18 +1,31 @@
-import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { PLYLoader } from "three-stdlib";
 
-type Props = {
-  plyB64?: string;          // base64 del .ply (binario)
-  pointSize?: number;       // tamaño del punto
-  height?: number;          // altura del visor
-  colorMode?: "rgb" | "scalar";
-  scalarField?: "z" | "depth";
-  downsample?: number;
-  originalImageSrc?: string | undefined;
-  meta?: any;
+export type PointCloudColorMode = "rgb" | "scalar";
+export type PointCloudScalarField = "z" | "depth";
+export type PointCloudStyle = "points" | "spheres";
+
+export type Props = {
+  // data
+  plyB64: string;
+
+  // color
+  colorMode: PointCloudColorMode;
+  scalarField: PointCloudScalarField;
+
+  // decimation (client-side)
+  downsample: number;
+
+  // visual controls
+  pointSize?: number;
+  style?: PointCloudStyle;
+
+  // OPTIONAL: server stride (solo para que TS no truene si lo pasas desde la vista)
+  // No lo usamos para decimar aqui (eso ya lo hace el backend), pero lo dejamos por compatibilidad.
+  stride?: number;
 };
 
 function b64ToBlobUrl(b64: string, mime = "application/octet-stream") {
@@ -21,7 +34,24 @@ function b64ToBlobUrl(b64: string, mime = "application/octet-stream") {
   return URL.createObjectURL(blob);
 }
 
-function PointsFromPLY({ url, pointSize, colorMode, scalarField, downsample, imgData, meta }: { url: string; pointSize: number; colorMode?: "rgb" | "scalar"; scalarField?: "z" | "depth"; downsample?: number; imgData?: ImageData | null; meta?: any }) {
+function PointsFromPLY({
+  url,
+  pointSize,
+  colorMode,
+  scalarField,
+  stride,
+  downsample,
+  style,
+}: {
+  url: string;
+  pointSize: number;
+  colorMode?: PointCloudColorMode;
+  scalarField?: PointCloudScalarField;
+  stride?: number;
+  downsample?: number;
+  style?: PointCloudStyle;
+}) {
+  const { camera, controls } = useThree() as any;
   const [geom, setGeom] = useState<THREE.BufferGeometry | null>(null);
 
   useEffect(() => {
@@ -32,34 +62,6 @@ function PointsFromPLY({ url, pointSize, colorMode, scalarField, downsample, img
       (g) => {
         if (!alive) return;
         g.computeVertexNormals?.();
-
-        try {
-          // If requested, override vertex colors using the provided imgData and meta (row-major mapping)
-          if (colorMode === "rgb" && imgData && meta) {
-            const pos = g.getAttribute("position");
-            const count = pos.count;
-            const w = meta.w ?? meta.width;
-            const h = meta.h ?? meta.height;
-            if (w && h && w * h >= count) {
-              const cols = new Float32Array(count * 3);
-              for (let i = 0; i < count; i++) {
-                const px = i % w;
-                const py = Math.floor(i / w);
-                const idx = (py * w + px) * 4;
-                const r = imgData.data[idx] / 255.0;
-                const gcol = imgData.data[idx + 1] / 255.0;
-                const b = imgData.data[idx + 2] / 255.0;
-                cols[i * 3 + 0] = r;
-                cols[i * 3 + 1] = gcol;
-                cols[i * 3 + 2] = b;
-              }
-              g.setAttribute("color", new THREE.BufferAttribute(cols, 3));
-            }
-          }
-        } catch (err) {
-          console.warn("Failed to apply projected RGB colors:", err);
-        }
-
         setGeom(g);
       },
       undefined,
@@ -70,47 +72,105 @@ function PointsFromPLY({ url, pointSize, colorMode, scalarField, downsample, img
     return () => {
       alive = false;
     };
-  }, [url, colorMode, scalarField, downsample, imgData, meta]);
+  }, [url, colorMode, scalarField, stride, downsample]);
 
   const material = useMemo(() => {
     return new THREE.PointsMaterial({
       size: pointSize,
-      vertexColors: true, // si el PLY trae color por vértice
+      vertexColors: true,
       sizeAttenuation: true,
     });
   }, [pointSize]);
 
-  if (!geom) return null;
+  const effectiveStride = Math.max(1, downsample ?? 1);
+  const effectiveStyle = style ?? "points";
 
-  // Si no trae color, se lo ponemos “blanco”
-  if (!geom.getAttribute("color")) {
+  const decimatedGeom = useMemo(() => {
+    if (!geom) return null;
+    if (effectiveStride <= 1) return geom;
+
     const pos = geom.getAttribute("position");
+    const col = geom.getAttribute("color");
+    const outCount = Math.floor(pos.count / effectiveStride);
+    const positions = new Float32Array(outCount * 3);
+    const colors = col ? new Float32Array(outCount * 3) : null;
+
+    let outIdx = 0;
+    for (let i = 0; i < pos.count; i += effectiveStride) {
+      positions[outIdx * 3 + 0] = pos.getX(i);
+      positions[outIdx * 3 + 1] = pos.getY(i);
+      positions[outIdx * 3 + 2] = pos.getZ(i);
+      if (col && colors) {
+        colors[outIdx * 3 + 0] = col.getX(i);
+        colors[outIdx * 3 + 1] = col.getY(i);
+        colors[outIdx * 3 + 2] = col.getZ(i);
+      }
+      outIdx += 1;
+      if (outIdx >= outCount) break;
+    }
+
+    const dec = new THREE.BufferGeometry();
+    dec.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    if (colors) dec.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    return dec;
+  }, [geom, effectiveStride]);
+
+  if (!decimatedGeom) return null;
+
+  if (!decimatedGeom.getAttribute("color")) {
+    const pos = decimatedGeom.getAttribute("position");
     const colors = new Float32Array(pos.count * 3);
     colors.fill(1.0);
-    geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    decimatedGeom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   }
 
-  // Centrar en origen
-  geom.computeBoundingBox();
-  const bb = geom.boundingBox;
+  decimatedGeom.computeBoundingBox();
+  const bb = decimatedGeom.boundingBox;
   if (bb) {
     const center = new THREE.Vector3();
     bb.getCenter(center);
-    geom.translate(-center.x, -center.y, -center.z);
+    decimatedGeom.translate(-center.x, -center.y, -center.z);
   }
+  decimatedGeom.computeBoundingSphere();
 
-  return <points geometry={geom} material={material} />;
+  useEffect(() => {
+    if (!decimatedGeom?.boundingSphere) return;
+    const sphere = decimatedGeom.boundingSphere;
+    const radius = Math.max(0.001, sphere.radius);
+    const distance = radius * 2.5;
+
+    camera.position.set(0, 0, distance);
+    camera.near = Math.max(0.001, distance / 100);
+    camera.far = Math.max(1000, distance * 10);
+    camera.updateProjectionMatrix();
+
+    if (controls?.target) {
+      controls.target.set(0, 0, 0);
+    }
+    if (controls?.update) controls.update();
+  }, [decimatedGeom, camera, controls]);
+
+  return (
+    <>
+      {effectiveStyle === "points" ? (
+        <points geometry={decimatedGeom} material={material} />
+      ) : (
+        <points geometry={decimatedGeom}>
+          <pointsMaterial size={Math.max(pointSize ?? 0.01, 0.02)} vertexColors sizeAttenuation />
+        </points>
+      )}
+    </>
+  );
 }
 
 export const PointCloudViewer: React.FC<Props> = ({
   plyB64,
   pointSize = 0.02,
-  height = 520,
   colorMode = "rgb",
   scalarField = "z",
-  downsample = 1,
-  originalImageSrc,
-  meta,
+  stride,
+  downsample,
+  style,
 }) => {
   const url = useMemo(() => {
     if (!plyB64) return null;
@@ -123,62 +183,38 @@ export const PointCloudViewer: React.FC<Props> = ({
     };
   }, [url]);
 
-  // Load original image into ImageData (resized to meta.w/meta.h) for projected RGB sampling
-  const [imgData, setImgData] = useState<ImageData | null>(null);
-  useEffect(() => {
-    if (!originalImageSrc || !meta) {
-      setImgData(null);
-      return;
-    }
-    const w = meta.w ?? meta.width ?? null;
-    const h = meta.h ?? meta.height ?? null;
-    if (!w || !h) {
-      setImgData(null);
-      return;
-    }
-
-    let alive = true;
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      if (!alive) return;
-      try {
-        const c = document.createElement("canvas");
-        c.width = w;
-        c.height = h;
-        const ctx = c.getContext("2d");
-        if (!ctx) return setImgData(null);
-        ctx.drawImage(img, 0, 0, w, h);
-        const data = ctx.getImageData(0, 0, w, h);
-        setImgData(data);
-      } catch (err) {
-        console.error("Failed to create image data for original image:", err);
-        setImgData(null);
-      }
-    };
-    img.onerror = () => setImgData(null);
-    img.src = originalImageSrc;
-    return () => {
-      alive = false;
-    };
-  }, [originalImageSrc, meta]);
-
   return (
-    <div className="w-full rounded border border-slate-700 overflow-hidden" style={{ height }}>
-      <Canvas camera={{ position: [0, 0, 2.5], near: 0.01, far: 5000 }}>
-        <ambientLight intensity={0.9} />
-        <gridHelper args={[10, 10]} />
-        <axesHelper args={[1]} />
+    <Canvas camera={{ position: [0, 0, 2.5], fov: 50, near: 0.001, far: 1000 }}>
+      <ambientLight intensity={0.8} />
+      <directionalLight position={[3, 5, 2]} intensity={0.6} />
 
-        {url && (
-          <PointsFromPLY url={url} pointSize={pointSize} colorMode={colorMode} scalarField={scalarField} downsample={downsample} imgData={imgData} meta={meta} />
-        )}
+      <gridHelper args={[10, 20]} />
+      <axesHelper args={[1.5]} />
 
-        <OrbitControls makeDefault />
-      </Canvas>
-      {!url && (
-        <div className="p-2 text-sm text-slate-400">No hay point cloud aún. Ejecuta “Fast Reconstruction” con make_ply=true.</div>
+      {url && (
+        <PointsFromPLY
+          url={url}
+          pointSize={pointSize}
+          colorMode={colorMode}
+          scalarField={scalarField}
+          stride={stride}
+          downsample={downsample}
+          style={style}
+        />
       )}
-    </div>
+
+      <OrbitControls
+        makeDefault
+        enableRotate
+        enableZoom
+        enablePan
+        screenSpacePanning
+        dampingFactor={0.08}
+        enableDamping
+        rotateSpeed={0.7}
+        zoomSpeed={0.9}
+        panSpeed={0.7}
+      />
+    </Canvas>
   );
 };

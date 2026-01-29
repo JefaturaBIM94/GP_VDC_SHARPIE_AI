@@ -1,8 +1,7 @@
-// frontend/src/views/FastReconstructionView.tsx
+﻿// frontend/src/views/FastReconstructionView.tsx
 import React, { useMemo, useState } from "react";
 import { reconstructFast, type FastReconResponse } from "../api";
 import { PointCloudViewer } from "../components/PointCloudViewer";
-
 
 function useObjectUrl(file: File | null) {
   const [url, setUrl] = useState<string | null>(null);
@@ -33,13 +32,11 @@ export default function FastReconstructionView() {
   const [plyB64, setPlyB64] = useState<string>("");
   const [pcColorMode, setPcColorMode] = useState<"rgb" | "scalar">("rgb");
   const [pcScalar, setPcScalar] = useState<"z" | "depth">("z");
-  const [pcDownsample, setPcDownsample] = useState<number>(1);
-  const [pointSize, setPointSize] = useState<number>(0.01);
-
-  // New controls: point size, real decimation (stride) and style
-  const [pcPointSize, setPcPointSize] = useState<number>(0.015);
-  const [pcStride, setPcStride] = useState<number>(2);
-  const [pcStyle, setPcStyle] = useState<"points" | "spheres">("points");
+  const [pointSize, setPointSize] = useState<number>(0.016);
+  const [stride, setStride] = useState<number>(4);
+  const [maxRes, setMaxRes] = useState<number>(1024);
+  const [style, setStyle] = useState<"points" | "spheres">("points");
+  const downsample = 1;
 
   const originalSrc = useObjectUrl(file);
 
@@ -52,6 +49,7 @@ export default function FastReconstructionView() {
     const f = e.target.files?.[0] ?? null;
     setFile(f);
     setResult(null);
+    setPlyB64("");
     setError(null);
   };
 
@@ -60,13 +58,22 @@ export default function FastReconstructionView() {
       setError("Primero sube una imagen.");
       return;
     }
+    setResult(null);
+    setPlyB64("");
     setError(null);
     setLoading(true);
     try {
-      const data = await reconstructFast(file, makePly);
-    setResult(data);
-    console.log("FAST RECON meta:", data.meta);
-    setPlyB64(data.ply_b64 || "");
+      const data = await reconstructFast(file, {
+        makePly,
+        stride,
+        maxRes,
+      });
+      setResult(data);
+      console.log("FAST RECON meta:", data.meta);
+      setPlyB64(data.ply_b64 || "");
+      if (data.meta?.warning && !data.ply_b64) {
+        setError(data.meta.warning);
+      }
     } catch (e) {
       console.error(e);
       setError("Error llamando al backend. Verifica /api/reconstruct-fast en Uvicorn.");
@@ -149,7 +156,7 @@ export default function FastReconstructionView() {
             <div className="h-2 rounded-full bg-slate-900 overflow-hidden">
               <div className="loading-bar-inner h-full w-1/2 bg-emerald-400/80" />
             </div>
-            <p className="mt-2 text-[11px] text-slate-500">Generando depth map + export 3D…</p>
+            <p className="mt-2 text-[11px] text-slate-500">Generando depth map + export 3D...</p>
           </div>
         )}
       </div>
@@ -171,7 +178,7 @@ export default function FastReconstructionView() {
               {depthSrc ? (
                 <img src={depthSrc} alt="Depth" className="h-full w-full object-contain" />
               ) : (
-                <div className="text-slate-500 text-sm px-6 text-center">Aquí aparecerá el depth map.</div>
+                <div className="text-slate-500 text-sm px-6 text-center">Aqui aparecera el depth map.</div>
               )}
             </div>
           </div>
@@ -183,66 +190,95 @@ export default function FastReconstructionView() {
             {/* header/controls */}
             <div className="p-3 border-b border-slate-900 flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-100">Point Cloud</div>
-              {/* deja aquí tus controles actuales (RGB/Scalar/Downsample/PointSize) */}
+              {/* deja aqui tus controles actuales (RGB/Scalar/Downsample/PointSize) */}
             </div>
 
             <div className="p-3">
-              <div className="mt-2 grid grid-cols-12 gap-3 text-xs text-white/80">
-                <label className="col-span-6 flex flex-col gap-1">
-                  <span>Point size: {pcPointSize.toFixed(3)}</span>
+              <div className="mb-3 flex items-center gap-3 text-[11px] text-slate-300">
+                <label className="flex items-center gap-2">
+                  <span className="text-slate-200">Load PLY</span>
+                  <input
+                    type="file"
+                    accept=".ply"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (!f) return;
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const text = reader.result as string;
+                        setPlyB64(btoa(text));
+                      };
+                      reader.readAsText(f);
+                    }}
+                    className="block text-[11px]"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-4 text-xs text-slate-200">
+                <div className="flex items-center gap-2">
+                  <span className="w-20">Point Size</span>
                   <input
                     type="range"
                     min={0.002}
-                    max={0.08}
+                    max={0.05}
                     step={0.001}
-                    value={pcPointSize}
-                    onChange={(e) => setPcPointSize(parseFloat(e.target.value))}
+                    value={pointSize}
+                    onChange={(e) => setPointSize(parseFloat(e.target.value))}
                   />
-                </label>
+                  <span className="w-12 text-right">{pointSize.toFixed(3)}</span>
+                </div>
 
-                <label className="col-span-6 flex flex-col gap-1">
-                  <span>Decimation (stride): {pcStride}</span>
+                <div className="flex items-center gap-2">
+                  <span className="w-28">Stride (server)</span>
                   <input
                     type="range"
-                    min={1}
-                    max={12}
+                    min={2}
+                    max={24}
                     step={1}
-                    value={pcStride}
-                    onChange={(e) => setPcStride(parseInt(e.target.value, 10))}
+                    value={stride}
+                    onChange={(e) => setStride(parseInt(e.target.value, 10))}
                   />
-                </label>
+                  <span className="w-10 text-right">{stride}x</span>
+                </div>
 
-                <label className="col-span-6 flex items-center gap-2">
-                  <span>Style</span>
+                <div className="flex items-center gap-2">
+                  <span className="w-20">Max Res</span>
+                  <input
+                    type="range"
+                    min={512}
+                    max={2048}
+                    step={64}
+                    value={maxRes}
+                    onChange={(e) => setMaxRes(parseInt(e.target.value, 10))}
+                  />
+                  <span className="w-14 text-right">{maxRes}px</span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="w-12">Style</span>
                   <select
                     className="rounded bg-black/30 px-2 py-1"
-                    value={pcStyle}
-                    onChange={(e) => setPcStyle(e.target.value as any)}
+                    value={style}
+                    onChange={(e) => setStyle(e.target.value as any)}
                   >
                     <option value="points">Points</option>
-                    <option value="spheres">Spheres (heavy)</option>
+                    <option value="spheres">Spheres</option>
                   </select>
-                </label>
+                </div>
               </div>
             </div>
 
             {/* viewer */}
             <div className="flex-1 min-h-0">
-              {plyB64 ? (
-                <PointCloudViewer
-                  plyB64={plyB64}
-                  colorMode={pcColorMode}
-                  scalarField={pcScalar}
-                  downsample={pcDownsample}
-                  pointSize={pcPointSize}
-                  stride={pcStride}
-                  style={pcStyle}
-                />
-              ) : (
-                <div className="flex h-full items-center justify-center text-xs text-white/60">
-                  Run reconstruction with "make_ply" enabled to preview the point cloud.
-                </div>
-              )}
+              <PointCloudViewer
+                plyB64={plyB64}
+                colorMode={pcColorMode}
+                scalarField={pcScalar}
+                downsample={downsample}
+                pointSize={pointSize}
+                stride={stride}
+                style={style}
+              />
             </div>
           </div>
         </div>

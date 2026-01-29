@@ -1,8 +1,8 @@
 // frontend/src/components/PointCloudViewer.tsx
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo } from "react";
 import * as THREE from "three";
-import { Canvas } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import { Canvas, useThree } from "@react-three/fiber";
+import { CameraControls } from "@react-three/drei";
 import { PLYLoader } from "three-stdlib";
 
 export type PointCloudColorMode = "rgb" | "scalar";
@@ -15,6 +15,17 @@ export type Props = {
   downsample: number;
   pointSize?: number;
 };
+
+function ExposeControls() {
+  const { controls } = useThree() as any;
+  useEffect(() => {
+    (window as any).__pc_controls = controls;
+    return () => {
+      (window as any).__pc_controls = null;
+    };
+  }, [controls]);
+  return null;
+}
 
 // b64 -> ArrayBuffer (binario)
 function b64ToArrayBuffer(b64: string) {
@@ -115,12 +126,36 @@ export function PointCloudViewer({
   }, [plyB64, colorMode, scalarField, downsample]);
 
   return (
-    <Canvas camera={{ position: [0, 0, 2.5], fov: 45 }}>
-      <ambientLight intensity={0.8} />
-      <points geometry={geom}>
-        <pointsMaterial size={pointSize} vertexColors sizeAttenuation />
-      </points>
-      <OrbitControls makeDefault />
-    </Canvas>
+    <div className="relative w-full rounded border border-slate-700 overflow-hidden" style={{ height: "100%" }}>
+      <div className="absolute z-10 top-2 right-2 flex gap-2">
+        <button
+          className="px-2 py-1 text-xs rounded bg-black/50 border border-white/10"
+          onClick={() => (window as any).__pc_controls?.reset(true)}
+        >
+          Reset
+        </button>
+        <button
+          className="px-2 py-1 text-xs rounded bg-black/50 border border-white/10"
+          onClick={() => (window as any).__pc_controls?.rotate(0, 0, Math.PI / 2, true)}
+        >
+          Roll +90 deg
+        </button>
+        <button
+          className="px-2 py-1 text-xs rounded bg-black/50 border border-white/10"
+          onClick={() => (window as any).__pc_controls?.rotate(0, 0, -Math.PI / 2, true)}
+        >
+          Roll -90 deg
+        </button>
+      </div>
+
+      <Canvas camera={{ position: [0, 0, 2.5], fov: 45 }}>
+        <ExposeControls />
+        <ambientLight intensity={0.8} />
+        <points geometry={geom}>
+          <pointsMaterial size={pointSize} vertexColors sizeAttenuation />
+        </points>
+        <CameraControls makeDefault enabled />
+      </Canvas>
+    </div>
   );
 }

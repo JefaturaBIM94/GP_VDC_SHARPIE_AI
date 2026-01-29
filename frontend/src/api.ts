@@ -84,6 +84,7 @@ export async function ocrBatch(files: File[]): Promise<OcrBatchResponse> {
 export type FastReconResponse = {
   depth_png_b64: string;
   ply_b64?: string | null;
+  ply_preview_b64?: string | null;
   meta?: {
     w?: number;
     h?: number;
@@ -91,10 +92,18 @@ export type FastReconResponse = {
   };
 };
 
-export async function reconstructFast(file: File, makePly: boolean = true): Promise<FastReconResponse> {
+export type FastReconRequest = {
+  makePly: boolean;
+  stride: number;
+  maxRes: number;
+};
+
+export async function reconstructFast(file: File, opts: FastReconRequest): Promise<FastReconResponse> {
   const fd = new FormData();
-  fd.append("file", file);
-  fd.append("make_ply", String(makePly));
+  fd.append("image", file);
+  fd.append("make_ply", String(opts.makePly));
+  fd.append("stride", String(opts.stride));
+  fd.append("max_res", String(opts.maxRes));
 
   const res = await fetch(`${API_BASE}/api/reconstruct-fast`, {
     method: "POST",
