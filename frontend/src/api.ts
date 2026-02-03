@@ -40,6 +40,7 @@ export type OcrItem = {
   codes: string[];
   confidence?: number; // <-- NUEVO
   status?: "OK" | "DUDOSO" | "RECHAZADO"; // <-- NUEVO
+  processed_at?: string; // <-- NUEVO (stream y batch pueden mandarlo)
   detections: OcrDetection[];
   preview_b64?: string;
   debug?: any;
@@ -80,6 +81,46 @@ export async function ocrBatch(files: File[]): Promise<OcrBatchResponse> {
     throw new Error(`ocrBatch failed: ${res.status} ${txt}`);
   }
   return (await res.json()) as OcrBatchResponse;
+}
+
+export async function ocrBatchStream(files: File[], onLine: (msg: any) => void): Promise<void> {
+  const fd = new FormData();
+  for (const f of files) fd.append("images", f);
+
+  const res = await fetch(`${API_BASE}/api/ocr-batch-stream`, { method: "POST", body: fd });
+  if (!res.ok || !res.body) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`ocrBatchStream failed: ${res.status} ${txt}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buf = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        onLine(JSON.parse(line));
+      } catch {}
+    }
+  }
+
+  // flush remaining decoder state + tail buffer
+  buf += decoder.decode();
+  const tail = buf.trim();
+  if (tail) {
+    try {
+      onLine(JSON.parse(tail));
+    } catch {}
+  }
 }
 
 

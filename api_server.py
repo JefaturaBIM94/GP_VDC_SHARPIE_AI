@@ -1,10 +1,13 @@
 # api_server.py
 from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Tuple, Optional, Literal
 from io import BytesIO
 import base64
+import json
+import datetime
 import uuid
 import re
 
@@ -814,6 +817,7 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
         global_codes.extend(codes)
 
         final_conf, status = _final_conf_and_status(best["dets"], codes)
+        processed_at = datetime.datetime.now().isoformat(timespec="seconds")
 
         debug_obj = {
             "roi_xyxy_on_canvas": best.get("roi_xyxy"),
@@ -832,6 +836,7 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
                 "status": status,
                 "detections": det_json,
                 "preview_b64": preview_b64,
+                "processed_at": processed_at,
                 "debug": debug_obj,
             }
         )
@@ -844,3 +849,110 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
             unique_codes.append(c)
 
     return {"items": items, "unique_codes": unique_codes}
+
+
+@app.post("/api/ocr-batch-stream")
+async def ocr_batch_stream(images: List[UploadFile] = File(...)):
+    if len(images) > 10:
+        images = images[:10]
+
+    # ✅ PRELOAD: lee TODO antes de devolver StreamingResponse
+    preloaded = []
+    for f in images:
+        try:
+            data = await f.read()
+        except Exception:
+            data = b""
+        preloaded.append((f.filename, data))
+
+    async def gen():
+        # header inicial opcional
+        yield json.dumps({"type": "start", "total": len(preloaded)}) + "\n"
+
+        for idx, (filename, data) in enumerate(preloaded):
+            try:
+                if not data:
+                    raise ValueError("empty upload")
+
+                pil = Image.open(BytesIO(data)).convert("RGB")
+                bgr0 = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+                best = _best_ocr_on_bgr(bgr0)
+
+                preview = best["preview_bgr"].copy()
+                for (bbox, text, conf) in best["dets"]:
+                    t = clean_token(text)  # type: ignore
+                    if not t:
+                        continue
+                    pts = np.array(bbox, dtype=np.int32)
+                    cv2.polylines(preview, [pts], True, (0, 255, 0), 3)
+                    cv2.putText(
+                        preview,
+                        f"{t} ({float(conf):.2f})",
+                        (pts[0][0], max(0, pts[0][1] - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                preview_b64 = _bgr_to_b64png(preview)
+
+                det_json = []
+                for (bbox, text, conf) in best["dets"]:
+                    det_json.append(
+                        {
+                            "text": text,
+                            "clean": clean_token(text),  # type: ignore
+                            "conf": float(conf),
+                            "bbox": [[float(p[0]), float(p[1])] for p in bbox],
+                        }
+                    )
+
+                codes = best["codes"] or []
+                final_conf, status = _final_conf_and_status(best["dets"], codes)
+
+                processed_at = datetime.datetime.now().isoformat(timespec="seconds")
+
+                debug_obj = {
+                    "roi_xyxy_on_canvas": best.get("roi_xyxy"),
+                    "orientation": best.get("orientation"),
+                    "final_score": best.get("score"),
+                }
+                if "postprocess_debug" in best:
+                    debug_obj["postprocess"] = best["postprocess_debug"]
+
+                item = {
+                    "type": "item",
+                    "index": idx,
+                    "filename": filename,
+                    "raw_text": best["text_lr"] or best["raw_text"] or "",
+                    "codes": codes,
+                    "confidence": final_conf,
+                    "status": status,
+                    "detections": det_json,
+                    "preview_b64": preview_b64,
+                    "processed_at": processed_at,
+                    "debug": debug_obj,
+                }
+
+                yield json.dumps(item) + "\n"
+            except Exception as e:
+                # ✅ No mates el stream: reporta error por item
+                yield json.dumps(
+                    {
+                        "type": "item_error",
+                        "index": idx,
+                        "filename": filename,
+                        "error": str(e),
+                    }
+                ) + "\n"
+
+        yield json.dumps({"type": "end"}) + "\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

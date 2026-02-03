@@ -1,16 +1,25 @@
 # backend/reconstruction/recon_engine.py
 from __future__ import annotations
 
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 from pathlib import Path
 from io import BytesIO
 import base64
 import sys
 import struct
+import time
 
 import numpy as np
 from PIL import Image
 import torch
 import cv2
+
+cv2.setNumThreads(0)
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 
 def _encode_png_b64(pil_img: Image.Image) -> str:
@@ -216,6 +225,7 @@ class DepthAnythingEngine:
         max_res: int = 1024,
         stride: int = 4,
     ) -> dict:
+        t0 = time.perf_counter()
         img = image_pil.convert("RGB")
         w, h = img.size
         scale = min(1.0, float(max_res) / float(max(w, h)))
@@ -223,9 +233,15 @@ class DepthAnythingEngine:
             new_w = max(1, int(w * scale))
             new_h = max(1, int(h * scale))
             img = img.resize((new_w, new_h), Image.BILINEAR)
+        t_resize = time.perf_counter()
 
+        print("[FASTRECON] engine: START predict_depth")
         depth = self.predict_depth(img)
+        t_depth = time.perf_counter()
+        print("[FASTRECON] engine: END predict_depth", f"{t_depth - t_resize:.3f}s")
+
         depth_png_b64 = self.depth_to_png_b64(depth)
+        t_png = time.perf_counter()
 
         h, w = depth.shape[:2]
         meta = {
@@ -240,13 +256,27 @@ class DepthAnythingEngine:
         ply_preview_b64 = ""
 
         if make_ply:
+            print("[FASTRECON] engine: START ply (ascii preview + binary)")
             ply_preview_bytes, meta_pc = _depth_to_ply_bytes(img, depth, stride=stride, format="ascii")
+            t_ply_prev = time.perf_counter()
             ply_bytes, _ = _depth_to_ply_bytes(img, depth, stride=stride, format="binary")
+            t_ply_bin = time.perf_counter()
+            print(
+                "[FASTRECON] engine: END ply",
+                f"ascii={t_ply_prev - t_png:.3f}s",
+                f"binary={t_ply_bin - t_ply_prev:.3f}s",
+                f"total={t_ply_bin - t_png:.3f}s",
+            )
+            print(
+                "[FASTRECON] engine: ply sizes",
+                f"preview_ascii={len(ply_preview_bytes) / 1024 / 1024:.2f}MB",
+                f"binary={len(ply_bytes) / 1024 / 1024:.2f}MB",
+            )
 
             meta["pc"] = meta_pc
 
             MAX_PREVIEW_BYTES = 6 * 1024 * 1024   # 6MB (viewer)
-            MAX_PLY_BYTES = 12 * 1024 * 1024      # 12MB (download por JSON)
+            MAX_PLY_BYTES = 8 * 1024 * 1024       # 8MB (download por JSON)
 
             if len(ply_preview_bytes) <= MAX_PREVIEW_BYTES:
                 ply_preview_b64 = base64.b64encode(ply_preview_bytes).decode("utf-8")
@@ -263,6 +293,16 @@ class DepthAnythingEngine:
                     f"PLY binario muy grande ({len(ply_bytes) / 1024 / 1024:.1f} MB). "
                     "Sube stride (8-16) o baja max_res."
                 )
+
+        t_end = time.perf_counter()
+        meta["timings"] = {
+            "resize_s": float(t_resize - t0),
+            "predict_depth_s": float(t_depth - t_resize),
+            "depth_png_s": float(t_png - t_depth),
+            "ply_preview_ascii_s": float((t_ply_prev - t_png) if make_ply else 0.0),
+            "ply_binary_s": float((t_ply_bin - t_ply_prev) if make_ply else 0.0),
+            "total_s": float(t_end - t0),
+        }
 
         return {
             "depth_png_b64": depth_png_b64,
@@ -371,6 +411,85 @@ def _pointcloud_to_ply_ascii(xyz: np.ndarray, rgb: np.ndarray) -> bytes:
     return "".join(lines).encode("utf-8")
 
 
+def _depth_to_pointcloud_ply_ascii(
+    image_pil: Image.Image,
+    depth: np.ndarray,
+    stride: int = 4,
+    fov_deg: float = 60.0,
+) -> tuple[bytes, dict]:
+    rgb = np.array(image_pil.convert("RGB"), dtype=np.uint8)
+    h, w = depth.shape[:2]
+
+    s = max(1, int(stride))
+
+    # depth -> normalized (robusto)
+    d = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    lo = np.percentile(d, 2.0)
+    hi = np.percentile(d, 98.0)
+    if hi <= lo + 1e-6:
+        hi = lo + 1e-6
+    dn = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+    z = (1.0 - dn).astype(np.float32)  # near -> larger
+
+    # sample grid (stride)
+    vv = np.arange(0, h, s, dtype=np.int32)
+    uu = np.arange(0, w, s, dtype=np.int32)
+    U, V = np.meshgrid(uu, vv)  # shape (hv, wv)
+
+    Z = z[V, U].astype(np.float32)
+    mask = Z > 1e-6
+
+    U_f = U[mask].astype(np.float32)
+    V_f = V[mask].astype(np.float32)
+    Z_f = Z[mask]
+
+    # intrinsics aprox
+    fov = np.deg2rad(float(fov_deg))
+    fx = 0.5 * w / np.tan(0.5 * fov)
+    fy = fx
+    cx = (w - 1) * 0.5
+    cy = (h - 1) * 0.5
+
+    X = (U_f - cx) / fx * Z_f
+    Y = -((V_f - cy) / fy * Z_f)
+
+    C = rgb[V_f.astype(np.int32), U_f.astype(np.int32)]  # Nx3 uint8
+
+    n = int(Z_f.shape[0])
+    header = (
+        "ply\n"
+        "format ascii 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    )
+
+    # arma texto rápido
+    lines = [header]
+    for i in range(n):
+        r, g, b = int(C[i, 0]), int(C[i, 1]), int(C[i, 2])
+        lines.append(f"{X[i]:.6f} {Y[i]:.6f} {Z_f[i]:.6f} {r} {g} {b}\n")
+
+    ply_bytes = "".join(lines).encode("utf-8")
+
+    meta = {
+        "pc_stride": int(s),
+        "fov_deg": float(fov_deg),
+        "fx": float(fx),
+        "fy": float(fy),
+        "cx": float(cx),
+        "cy": float(cy),
+        "depth_norm": {"p2": float(lo), "p98": float(hi), "z_inverted": True},
+        "num_points": int(n),
+    }
+    return ply_bytes, meta
+
+
 def _pointcloud_to_ply_binary_le(xyz: np.ndarray, rgb: np.ndarray) -> bytes:
     """
     PLY binario little-endian (CloudCompare-friendly y mucho mas chico).
@@ -389,23 +508,29 @@ def _pointcloud_to_ply_binary_le(xyz: np.ndarray, rgb: np.ndarray) -> bytes:
         "end_header\n"
     ).encode("ascii")
 
-    # pack row-by-row: 3 floats + 3 uchar
-    buf = bytearray()
-    buf.extend(header)
-
-    # asegura dtypes
+    # pack vectorizado (mucho mas rapido que for/struct.pack)
     xyz_f = np.asarray(xyz, dtype=np.float32)
     rgb_u = np.asarray(rgb, dtype=np.uint8)
 
-    for i in range(n):
-        buf.extend(struct.pack("<fffBBB",
-                               float(xyz_f[i, 0]),
-                               float(xyz_f[i, 1]),
-                               float(xyz_f[i, 2]),
-                               int(rgb_u[i, 0]),
-                               int(rgb_u[i, 1]),
-                               int(rgb_u[i, 2])))
-    return bytes(buf)
+    dtype = np.dtype(
+        [
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+        ]
+    )
+    data = np.empty(n, dtype=dtype)
+    data["x"] = xyz_f[:, 0]
+    data["y"] = xyz_f[:, 1]
+    data["z"] = xyz_f[:, 2]
+    data["red"] = rgb_u[:, 0]
+    data["green"] = rgb_u[:, 1]
+    data["blue"] = rgb_u[:, 2]
+
+    return header + data.tobytes()
 
 
 def _depth_to_ply_bytes(
@@ -417,15 +542,15 @@ def _depth_to_ply_bytes(
     """
     Devuelve (ply_bytes, meta_pc). Default: binary (CloudCompare).
     """
+    if format == "ascii":
+        return _depth_to_pointcloud_ply_ascii(image_pil=image_pil, depth=depth, stride=stride, fov_deg=60.0)
+
     xyz, rgb, meta_pc = _depth_to_pointcloud_arrays(
         image_pil=image_pil,
         depth=depth,
         stride=stride,
         fov_deg=60.0,
     )
-
-    if format == "ascii":
-        return _pointcloud_to_ply_ascii(xyz, rgb), meta_pc
     return _pointcloud_to_ply_binary_le(xyz, rgb), meta_pc
 
 

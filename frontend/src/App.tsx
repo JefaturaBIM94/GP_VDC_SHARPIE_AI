@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 import {
   segmentImage,
-  ocrBatch,
+  ocrBatchStream,
   type SegmentResponse,
   type InstanceLabel,
   type OcrBatchResponse,
@@ -513,33 +513,63 @@ export default function App() {
     setError(null);
     setLoading(true);
 
+    // limpia resultados previos sobre cards (pero deja originales)
+    setOcrCards((prev) =>
+      prev.map((c) => ({ ...c, resultB64: undefined, codes: [], confidence: undefined, status: undefined }))
+    );
+    setOcrResult(null);
+
     try {
-      const data = await ocrBatch(ocrFiles);
-      setOcrResult(data);
+      const unique = new Set<string>();
+      const items: any[] = [];
 
-      // merge de resultados al mosaico por filename
-      setOcrCards((prev) => {
-        const byName = new Map<string, (typeof data.items)[number]>();
-        for (const it of data.items ?? []) byName.set(it.filename, it);
+      await ocrBatchStream(ocrFiles, (msg) => {
+        if (msg?.type === "item") {
+          const filename = msg.filename as string;
 
-        return prev.map((card) => {
-          const hit = byName.get(card.filename);
-          if (!hit) return card;
+          // actualiza card específica
+          setOcrCards((prev) =>
+            prev.map((c) =>
+              c.filename === filename
+                ? {
+                    ...c,
+                    resultB64: msg.preview_b64,
+                    codes: msg.codes ?? [],
+                    confidence: msg.confidence,
+                    status: msg.status,
+                  }
+                : c
+            )
+          );
 
-          return {
-            ...card,
-            resultB64: hit.preview_b64,
-            codes: hit.codes ?? [],
-            confidence: hit.confidence,
-            status: hit.status,
-          };
-        });
+          items.push(msg);
+          for (const k of msg.codes ?? []) unique.add(k);
+        } else if (msg?.type === "item_error") {
+          const filename = msg.filename as string;
+          console.warn("OCR item error:", filename, msg.error);
+
+          setOcrCards((prev) =>
+            prev.map((c) =>
+              c.filename === filename ? { ...c, codes: [], confidence: 0, status: "RECHAZADO" } : c
+            )
+          );
+
+          items.push({
+            filename,
+            processed_at: msg.processed_at ?? "",
+            status: "RECHAZADO",
+            confidence: 0,
+            codes: [],
+            error: msg.error ?? "",
+          });
+        }
       });
 
+      setOcrResult({ items, unique_codes: Array.from(unique) });
       setOcrSelectedIdx(0);
     } catch (err) {
       console.error(err);
-      setError("Error llamando OCR al backend. Verifica el endpoint /api/ocr-batch.");
+      setError("Error llamando OCR streaming al backend.");
     } finally {
       setLoading(false);
     }
@@ -550,13 +580,16 @@ export default function App() {
     if (!ocrResult) return;
 
     const rows: string[] = [];
-    rows.push(["filename", "codes"].join(","));
+    rows.push(["filename", "processed_at", "status", "confidence", "codes"].join(","));
 
     for (const item of ocrResult.items) {
       const codes = (item.codes ?? []).join(" | ");
       const safeFilename = `"${(item.filename ?? "").replace(/"/g, '""')}"`;
+      const processedAt = `"${String((item as any).processed_at ?? "").replace(/"/g, '""')}"`;
+      const status = `"${String((item as any).status ?? "").replace(/"/g, '""')}"`;
+      const conf = (item as any).confidence != null ? String((item as any).confidence) : "";
       const safeCodes = `"${codes.replace(/"/g, '""')}"`;
-      rows.push([safeFilename, safeCodes].join(","));
+      rows.push([safeFilename, processedAt, status, conf, safeCodes].join(","));
     }
 
     rows.push("");
