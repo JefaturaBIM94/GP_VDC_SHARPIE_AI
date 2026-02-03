@@ -3,7 +3,7 @@ from fastapi import APIRouter, File, UploadFile, Form
 from pydantic import BaseModel
 from typing import Optional
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .recon_engine import DepthAnythingEngine
 
@@ -27,7 +27,9 @@ async def reconstruct_fast(
     max_res: int = Form(1024),
 ):
     content = await image.read()
-    image_pil = Image.open(BytesIO(content)).convert("RGB")
+    image_pil = Image.open(BytesIO(content))
+    image_pil = ImageOps.exif_transpose(image_pil)  # match browser orientation
+    image_pil = image_pil.convert("RGB")
 
     result = _engine.reconstruct_fast(
         image_pil=image_pil,

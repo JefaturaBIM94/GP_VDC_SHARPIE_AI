@@ -1,5 +1,5 @@
 // frontend/src/views/Sam3CompareView.tsx
-import React, { useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { segmentImage, type SegmentResponse } from "../api";
 import { SegmentViewer } from "../components/SegmentViewer";
 import ResultSidePanel from "../components/ResultSidePanel";

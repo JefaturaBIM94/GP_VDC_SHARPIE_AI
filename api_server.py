@@ -2,7 +2,7 @@
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Literal
 from io import BytesIO
 import base64
 import uuid
@@ -479,6 +479,17 @@ def _preprocess_variants_for_ocr(bgr: np.ndarray) -> List[np.ndarray]:
     g1 = clahe.apply(gray)
     out.append(g1)
 
+    # --- (A) realce de relieve: black-hat (muy útil en grabado) ---
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    blackhat = cv2.morphologyEx(g1, cv2.MORPH_BLACKHAT, kernel)
+    out.append(blackhat)
+
+    # --- (B) normalización de iluminación: divide by blur (barato y efectivo) ---
+    blur_big = cv2.GaussianBlur(g1, (0, 0), 9.0)
+    # evita división por 0
+    norm = cv2.divide(g1, blur_big + 1, scale=255)
+    out.append(norm)
+
     blur = cv2.GaussianBlur(g1, (0, 0), 1.2)
     unsharp = cv2.addWeighted(g1, 1.8, blur, -0.8, 0)
     out.append(unsharp)
@@ -545,6 +556,118 @@ def _apply_orientation(bgr: np.ndarray, k_rot90: int, flip: bool) -> np.ndarray:
     if flip:
         out = cv2.flip(out, 1)
     return out
+
+
+OcrStatus = Literal["OK", "DUDOSO", "RECHAZADO"]
+
+
+def _aggregate_confidence(dets: list) -> float:
+    """
+    Confianza agregada [0..1] usando detections EasyOCR.
+    Pondera por longitud de token limpio y por conf.
+    """
+    if not dets:
+        return 0.0
+
+    total_w = 0.0
+    total = 0.0
+    for (bbox, text, conf) in dets:
+        try:
+            c = float(conf)
+        except Exception:
+            continue
+        t = clean_token(text)  # type: ignore
+        if not t:
+            continue
+        # peso por longitud del token (capado)
+        w = float(min(6, max(1, len(t))))
+        total += c * w
+        total_w += w
+
+    if total_w <= 0:
+        return 0.0
+
+    # promedio ponderado
+    return max(0.0, min(1.0, total / total_w))
+
+
+def _ambiguity_penalty(dets: list) -> float:
+    """
+    Penaliza ambigüedad típica en grabado:
+    - demasiados tokens (ruido)
+    - tokens muy parecidos repetidos
+    Devuelve penalización [0..0.35]
+    """
+    if not dets:
+        return 0.35
+
+    toks = []
+    for (_, text, conf) in dets:
+        t = clean_token(text)  # type: ignore
+        if t:
+            toks.append(t)
+
+    if not toks:
+        return 0.35
+
+    # ruido por demasiados tokens
+    n = len(toks)
+    p = 0.0
+    if n >= 10:
+        p += 0.20
+    elif n >= 7:
+        p += 0.12
+    elif n >= 5:
+        p += 0.07
+
+    # repetición exacta
+    uniq = len(set(toks))
+    if uniq <= max(1, n // 2):
+        p += 0.10
+
+    # penaliza confusiones típicas en posiciones críticas
+    joined = "".join(toks)
+    if any(ch in joined for ch in ["O", "0", "I", "1", "L"]):
+        p += 0.05
+
+    return max(0.0, min(0.35, p))
+
+
+def _pattern_bonus(codes: list[str]) -> float:
+    """
+    Bonus por tener 1+ claves válidas.
+    Devuelve [0..0.25]
+    """
+    if not codes:
+        return 0.0
+    # más bonus si hay separadores (familias tipo H-IC-6-0)
+    c0 = codes[0]
+    seps = c0.count("-") + c0.count("_")
+    b = 0.12 + min(0.13, 0.05 * seps)
+    return max(0.0, min(0.25, b))
+
+
+def _final_conf_and_status(dets: list, codes: list[str]) -> tuple[float, OcrStatus]:
+    """
+    Conf final: base_conf + bonus - penalty, clamped.
+    Status por umbrales.
+    """
+    base = _aggregate_confidence(dets)
+    bonus = _pattern_bonus(codes)
+    pen = _ambiguity_penalty(dets)
+
+    conf = base + bonus - pen
+    conf = max(0.0, min(1.0, conf))
+
+    # Umbrales recomendados (ajustables)
+    if codes and conf >= 0.78:
+        return conf, "OK"
+    if codes and conf >= 0.60:
+        return conf, "DUDOSO"
+    # si no hay codes pero hay buena conf, igual dudoso (texto parcial)
+    if (not codes) and conf >= 0.70:
+        return conf, "DUDOSO"
+    return conf, "RECHAZADO"
 
 
 def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
@@ -690,6 +813,8 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
         codes = best["codes"] or []
         global_codes.extend(codes)
 
+        final_conf, status = _final_conf_and_status(best["dets"], codes)
+
         debug_obj = {
             "roi_xyxy_on_canvas": best.get("roi_xyxy"),
             "orientation": best.get("orientation"),
@@ -703,6 +828,8 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
                 "filename": f.filename,
                 "raw_text": best["text_lr"] or best["raw_text"] or "",
                 "codes": codes,
+                "confidence": final_conf,
+                "status": status,
                 "detections": det_json,
                 "preview_b64": preview_b64,
                 "debug": debug_obj,

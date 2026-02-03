@@ -1,12 +1,13 @@
 ﻿// frontend/src/views/FastReconstructionView.tsx
-import React, { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ChangeEvent } from "react";
 import { reconstructFast, type FastReconResponse } from "../api";
 import { PointCloudViewer } from "../components/PointCloudViewer";
 
 function useObjectUrl(file: File | null) {
   const [url, setUrl] = useState<string | null>(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!file) {
       setUrl(null);
       return;
@@ -30,8 +31,8 @@ export default function FastReconstructionView() {
 
   // Point cloud viewer controls
   const [plyB64, setPlyB64] = useState<string>("");
-  const [pcColorMode, setPcColorMode] = useState<"rgb" | "scalar">("rgb");
-  const [pcScalar, setPcScalar] = useState<"z" | "depth">("z");
+  const [pcColorMode] = useState<"rgb" | "scalar">("rgb");
+  const [pcScalar] = useState<"z" | "depth">("z");
   const [pointSize, setPointSize] = useState<number>(0.016);
   const [stride, setStride] = useState<number>(4);
   const [maxRes, setMaxRes] = useState<number>(1024);
@@ -45,7 +46,7 @@ export default function FastReconstructionView() {
     return `data:image/png;base64,${result.depth_png_b64}`;
   }, [result]);
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0] ?? null;
     setFile(f);
     setResult(null);

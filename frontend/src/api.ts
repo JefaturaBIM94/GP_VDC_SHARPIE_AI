@@ -38,6 +38,8 @@ export type OcrItem = {
   filename: string;
   raw_text: string;
   codes: string[];
+  confidence?: number; // <-- NUEVO
+  status?: "OK" | "DUDOSO" | "RECHAZADO"; // <-- NUEVO
   detections: OcrDetection[];
   preview_b64?: string;
   debug?: any;
