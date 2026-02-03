@@ -31,6 +31,7 @@ export default function FastReconstructionView() {
 
   // Point cloud viewer controls
   const [plyB64, setPlyB64] = useState<string>("");
+  const [viewerKey, setViewerKey] = useState<number>(0);
   const [pcColorMode] = useState<"rgb" | "scalar">("rgb");
   const [pcScalar] = useState<"z" | "depth">("z");
   const [pointSize, setPointSize] = useState<number>(0.016);
@@ -51,6 +52,7 @@ export default function FastReconstructionView() {
     setFile(f);
     setResult(null);
     setPlyB64("");
+    setViewerKey((k) => k + 1);
     setError(null);
   };
 
@@ -61,6 +63,7 @@ export default function FastReconstructionView() {
     }
     setResult(null);
     setPlyB64("");
+    setViewerKey((k) => k + 1);
     setError(null);
     setLoading(true);
     try {
@@ -272,6 +275,7 @@ export default function FastReconstructionView() {
             {/* viewer */}
             <div className="flex-1 min-h-0">
               <PointCloudViewer
+                key={viewerKey}
                 plyB64={plyB64}
                 colorMode={pcColorMode}
                 scalarField={pcScalar}
