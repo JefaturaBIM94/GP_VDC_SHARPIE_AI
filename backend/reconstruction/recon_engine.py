@@ -5,6 +5,7 @@ from pathlib import Path
 from io import BytesIO
 import base64
 import sys
+import struct
 
 import numpy as np
 from PIL import Image
@@ -70,7 +71,7 @@ def _make_ply_from_depth_rgb(image_pil, depth: np.ndarray, stride: int = 2) -> s
     return base64.b64encode(ply_text).decode("utf-8")
 
 
-class ReconEngine:
+class DepthAnythingEngine:
     def __init__(self):
         self._model = None
         self._device = "cpu"  # por ahora
@@ -208,8 +209,22 @@ class ReconEngine:
         pil = Image.fromarray(rgb)
         return _encode_png_b64(pil)
 
-    def reconstruct_fast(self, image_pil: Image.Image, make_ply: bool = False) -> dict:
-        depth = self.predict_depth(image_pil)
+    def reconstruct_fast(
+        self,
+        image_pil: Image.Image,
+        make_ply: bool = True,
+        max_res: int = 1024,
+        stride: int = 4,
+    ) -> dict:
+        img = image_pil.convert("RGB")
+        w, h = img.size
+        scale = min(1.0, float(max_res) / float(max(w, h)))
+        if scale < 1.0:
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            img = img.resize((new_w, new_h), Image.BILINEAR)
+
+        depth = self.predict_depth(img)
         depth_png_b64 = self.depth_to_png_b64(depth)
 
         h, w = depth.shape[:2]
@@ -220,92 +235,101 @@ class ReconEngine:
             "h": int(h),
         }
 
+        stride = max(1, int(stride))
         ply_b64 = ""
+        ply_preview_b64 = ""
+
         if make_ply:
-            try:
-                ply_b64 = _make_ply_from_depth_rgb(image_pil, depth, stride=2)
-                meta["pointcloud"] = {"method": "rgb_projected", "stride": 2}
-            except Exception:
-                # fallback to existing generator (returns bytes + meta)
-                try:
-                    ply_bytes, pc_meta = _depth_to_pointcloud_ply_ascii(
-                        image_pil=image_pil,
-                        depth=depth,
-                        stride=3,
-                        fov_deg=60.0,
-                    )
-                    ply_b64 = _b64_bytes(ply_bytes)
-                    meta["pointcloud"] = pc_meta
-                except Exception:
-                    ply_b64 = ""
+            ply_preview_bytes, meta_pc = _depth_to_ply_bytes(img, depth, stride=stride, format="ascii")
+            ply_bytes, _ = _depth_to_ply_bytes(img, depth, stride=stride, format="binary")
+
+            meta["pc"] = meta_pc
+
+            MAX_PREVIEW_BYTES = 6 * 1024 * 1024   # 6MB (viewer)
+            MAX_PLY_BYTES = 12 * 1024 * 1024      # 12MB (download por JSON)
+
+            if len(ply_preview_bytes) <= MAX_PREVIEW_BYTES:
+                ply_preview_b64 = base64.b64encode(ply_preview_bytes).decode("utf-8")
+            else:
+                meta["warning_preview"] = (
+                    f"Preview PLY (ASCII) muy grande ({len(ply_preview_bytes) / 1024 / 1024:.1f} MB). "
+                    "Sube stride."
+                )
+
+            if len(ply_bytes) <= MAX_PLY_BYTES:
+                ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
+            else:
+                meta["warning"] = (
+                    f"PLY binario muy grande ({len(ply_bytes) / 1024 / 1024:.1f} MB). "
+                    "Sube stride (8-16) o baja max_res."
+                )
 
         return {
             "depth_png_b64": depth_png_b64,
             "ply_b64": ply_b64,
+            "ply_preview_b64": ply_preview_b64,
             "meta": meta,
         }
 
 
-def _depth_to_pointcloud_ply_ascii(
+def _depth_to_pointcloud_arrays(
     image_pil: Image.Image,
     depth: np.ndarray,
-    stride: int = 3,
+    stride: int = 4,
     fov_deg: float = 60.0,
-) -> tuple[bytes, dict]:
+):
     """
-    Genera PLY ASCII con RGB proyectado desde la imagen original.
-    Depth es relativo (DepthAnythingV2), así que normalizamos a [0..1] e invertimos para pseudo-Z.
+    Vectorizado: devuelve (xyz float32 Nx3, rgb uint8 Nx3, meta dict)
+    depth = relativo; lo normalizamos con percentiles y lo invertimos para pseudo-Z.
     """
-    rgb = np.array(image_pil.convert("RGB"), dtype=np.uint8)
+    rgb_img = np.array(image_pil.convert("RGB"), dtype=np.uint8)
     h, w = depth.shape[:2]
+    s = max(1, int(stride))
 
-    # 1) depth -> z_norm (0..1). Invertimos para que "cerca" se vea más alto.
-    d = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+    # --- normalize depth robust ---
+    d = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     lo = np.percentile(d, 2.0)
     hi = np.percentile(d, 98.0)
     if hi <= lo + 1e-6:
         hi = lo + 1e-6
     dn = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
-    z = 1.0 - dn  # near -> larger
+    z = (1.0 - dn).astype(np.float32)  # near -> larger
 
-    # 2) intrinsics aproximadas (pinhole)
-    fov = np.deg2rad(fov_deg)
+    # --- sample grid (stride) ---
+    z_s = z[0:h:s, 0:w:s]
+    rgb_s = rgb_img[0:h:s, 0:w:s, :]
+
+    # mask valid
+    m = z_s > 1e-6
+    if not np.any(m):
+        # empty pointcloud
+        xyz = np.zeros((0, 3), dtype=np.float32)
+        rgb = np.zeros((0, 3), dtype=np.uint8)
+        meta = {"num_points": 0, "pc_stride": s, "depth_norm": {"p2": float(lo), "p98": float(hi), "z_inverted": True}}
+        return xyz, rgb, meta
+
+    # --- intrinsics approx (pinhole) ---
+    fov = np.deg2rad(float(fov_deg))
     fx = 0.5 * w / np.tan(0.5 * fov)
     fy = fx
     cx = (w - 1) * 0.5
     cy = (h - 1) * 0.5
 
-    pts = []
-    # 3) backproject
-    s = max(1, int(stride))
-    for v in range(0, h, s):
-        for u in range(0, w, s):
-            zz = float(z[v, u])
-            # descarta "vacíos"
-            if zz <= 1e-6:
-                continue
+    # coordinates for sampled grid
+    us = np.arange(0, w, s, dtype=np.float32)
+    vs = np.arange(0, h, s, dtype=np.float32)
+    U, V = np.meshgrid(us, vs)  # Hs x Ws
 
-            X = (u - cx) / fx * zz
-            Y = -((v - cy) / fy * zz)
-            Z = zz
+    zz = z_s[m].astype(np.float32)
+    uu = U[m].astype(np.float32)
+    vv = V[m].astype(np.float32)
 
-            r, g, b = rgb[v, u].tolist()
-            pts.append((X, Y, Z, r, g, b))
+    X = (uu - cx) / fx * zz
+    Y = -((vv - cy) / fy * zz)
+    Z = zz
 
-    header = (
-        "ply\n"
-        "format ascii 1.0\n"
-        f"element vertex {len(pts)}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
-        "end_header\n"
-    )
-    body = "\n".join(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}" for x, y, z, r, g, b in pts) + "\n"
-    ply_bytes = (header + body).encode("utf-8")
+    xyz = np.stack([X, Y, Z], axis=1).astype(np.float32)
+    rgb = rgb_s[m].astype(np.uint8)  # Nx3
 
     meta = {
         "pc_stride": s,
@@ -315,14 +339,95 @@ def _depth_to_pointcloud_ply_ascii(
         "cx": float(cx),
         "cy": float(cy),
         "depth_norm": {"p2": float(lo), "p98": float(hi), "z_inverted": True},
-        "num_points": int(len(pts)),
+        "num_points": int(xyz.shape[0]),
     }
-    return ply_bytes, meta
+    return xyz, rgb, meta
 
 
-def _b64_bytes(data: bytes) -> str:
-    return base64.b64encode(data).decode("utf-8")
+def _pointcloud_to_ply_ascii(xyz: np.ndarray, rgb: np.ndarray) -> bytes:
+    """
+    ASCII PLY: util para debug / viewer web si quieres mantenerlo simple.
+    """
+    n = int(xyz.shape[0])
+    header = (
+        "ply\n"
+        "format ascii 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    )
+    # formatea con fixed decimals (evita scientific)
+    lines = [header]
+    # xyz float32, rgb uint8
+    for i in range(n):
+        x, y, z = float(xyz[i, 0]), float(xyz[i, 1]), float(xyz[i, 2])
+        r, g, b = int(rgb[i, 0]), int(rgb[i, 1]), int(rgb[i, 2])
+        lines.append(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}\n")
+    return "".join(lines).encode("utf-8")
 
 
-# Alias for compatibility with imports elsewhere (e.g. routes.py expects DepthAnythingEngine)
-DepthAnythingEngine = ReconEngine
+def _pointcloud_to_ply_binary_le(xyz: np.ndarray, rgb: np.ndarray) -> bytes:
+    """
+    PLY binario little-endian (CloudCompare-friendly y mucho mas chico).
+    """
+    n = int(xyz.shape[0])
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    ).encode("ascii")
+
+    # pack row-by-row: 3 floats + 3 uchar
+    buf = bytearray()
+    buf.extend(header)
+
+    # asegura dtypes
+    xyz_f = np.asarray(xyz, dtype=np.float32)
+    rgb_u = np.asarray(rgb, dtype=np.uint8)
+
+    for i in range(n):
+        buf.extend(struct.pack("<fffBBB",
+                               float(xyz_f[i, 0]),
+                               float(xyz_f[i, 1]),
+                               float(xyz_f[i, 2]),
+                               int(rgb_u[i, 0]),
+                               int(rgb_u[i, 1]),
+                               int(rgb_u[i, 2])))
+    return bytes(buf)
+
+
+def _depth_to_ply_bytes(
+    image_pil: Image.Image,
+    depth: np.ndarray,
+    stride: int = 4,
+    format: str = "binary",  # "binary" o "ascii"
+) -> tuple[bytes, dict]:
+    """
+    Devuelve (ply_bytes, meta_pc). Default: binary (CloudCompare).
+    """
+    xyz, rgb, meta_pc = _depth_to_pointcloud_arrays(
+        image_pil=image_pil,
+        depth=depth,
+        stride=stride,
+        fov_deg=60.0,
+    )
+
+    if format == "ascii":
+        return _pointcloud_to_ply_ascii(xyz, rgb), meta_pc
+    return _pointcloud_to_ply_binary_le(xyz, rgb), meta_pc
+
+
+# Alias for compatibility with imports elsewhere (e.g. some code expects ReconEngine)
+ReconEngine = DepthAnythingEngine

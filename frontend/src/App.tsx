@@ -1,5 +1,5 @@
 // frontend/src/App.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 import {
   segmentImage,
@@ -7,8 +7,6 @@ import {
   type SegmentResponse,
   type InstanceLabel,
   type OcrBatchResponse,
-  type OcrItem,
-  type OcrDetection,
 } from "./api";
 import Sam3CompareView from "./views/Sam3CompareView";
 import FastReconstructionView from "./views/FastReconstructionView";
@@ -18,6 +16,15 @@ import ResultSidePanel from "./components/ResultSidePanel";
 type CountMode = "simple" | "multi";
 type ChartType = "donut" | "pie" | "bubble";
 type ToolMode = "sam3" | "sam3_compare" | "ocr" | "fast_recon";
+
+type OcrCard = {
+  filename: string;
+  originalUrl: string; // objectURL
+  resultB64?: string; // preview_b64 cuando exista
+  codes?: string[];
+  confidence?: number;
+  status?: "OK" | "DUDOSO" | "RECHAZADO";
+};
 
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
@@ -331,6 +338,8 @@ export default function App() {
   const [ocrFiles, setOcrFiles] = useState<File[]>([]);
   const [ocrResult, setOcrResult] = useState<OcrBatchResponse | null>(null);
   const [ocrSelectedIdx, setOcrSelectedIdx] = useState<number>(0);
+  const [ocrCards, setOcrCards] = useState<OcrCard[]>([]);
+  const ocrCardsRef = useRef<OcrCard[]>([]);
 
   // Hover state (SAM3)
   const [hoverId, setHoverId] = useState<number | null>(null);
@@ -350,7 +359,37 @@ export default function App() {
     setOcrFiles([]);
     setOcrResult(null);
     setOcrSelectedIdx(0);
+    setOcrCards((prev) => {
+      revokeOcrCards(prev);
+      return [];
+    });
   };
+
+  function buildOcrCards(files: File[]): OcrCard[] {
+    return files.slice(0, 10).map((f) => ({
+      filename: f.name,
+      originalUrl: URL.createObjectURL(f),
+    }));
+  }
+
+  function revokeOcrCards(cards: OcrCard[]) {
+    for (const c of cards) {
+      try {
+        URL.revokeObjectURL(c.originalUrl);
+      } catch {}
+    }
+  }
+
+  useEffect(() => {
+    ocrCardsRef.current = ocrCards;
+  }, [ocrCards]);
+
+  useEffect(() => {
+    return () => {
+      revokeOcrCards(ocrCardsRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onToolModeChange = (m: ToolMode) => {
     setToolMode(m);
@@ -381,6 +420,13 @@ export default function App() {
     } else {
       const files = Array.from(e.target.files ?? []);
       const limited = files.slice(0, 10);
+
+      // limpia objectURLs previos
+      setOcrCards((prev) => {
+        revokeOcrCards(prev);
+        return buildOcrCards(limited);
+      });
+
       setOcrFiles(limited);
       setOcrResult(null);
       setOcrSelectedIdx(0);
@@ -470,6 +516,26 @@ export default function App() {
     try {
       const data = await ocrBatch(ocrFiles);
       setOcrResult(data);
+
+      // merge de resultados al mosaico por filename
+      setOcrCards((prev) => {
+        const byName = new Map<string, (typeof data.items)[number]>();
+        for (const it of data.items ?? []) byName.set(it.filename, it);
+
+        return prev.map((card) => {
+          const hit = byName.get(card.filename);
+          if (!hit) return card;
+
+          return {
+            ...card,
+            resultB64: hit.preview_b64,
+            codes: hit.codes ?? [],
+            confidence: hit.confidence,
+            status: hit.status,
+          };
+        });
+      });
+
       setOcrSelectedIdx(0);
     } catch (err) {
       console.error(err);
@@ -548,20 +614,6 @@ export default function App() {
 
   // legacy id_map & hover pipeline removed; SegmentViewer handles these tasks now
 
-  // ===== OCR helpers =====
-  const ocrSelectedItem: OcrItem | null = useMemo(() => {
-    if (!ocrResult?.items?.length) return null;
-    const idx = Math.min(Math.max(0, ocrSelectedIdx), ocrResult.items.length - 1);
-    return ocrResult.items[idx] ?? null;
-  }, [ocrResult, ocrSelectedIdx]);
-
-  const ocrPreviewSrc = useMemo(() => {
-    if (!ocrSelectedItem?.preview_b64) return null;
-    return `data:image/png;base64,${ocrSelectedItem.preview_b64}`;
-  }, [ocrSelectedItem]);
-
-  const ocrDetections: OcrDetection[] = (ocrSelectedItem?.detections ?? []) as OcrDetection[];
-
   return (
     <div className="min-h-screen bg-black text-slate-50 flex flex-col">
       {/* HEADER */}
@@ -581,7 +633,7 @@ export default function App() {
             </span>
           </div>
         </div>
-        <div className="text-[11px] text-slate-500 uppercase tracking-[0.25em]">Beta · Local Playground</div>
+        <div className="text-[11px] text-slate-500 uppercase tracking-[0.25em]">Beta · NEW UI TEST</div>
       </header>
 
       {/* MAIN GRID */}
@@ -854,6 +906,14 @@ export default function App() {
                     >
                       {debugMappingActive ? "DEBUG: Mapping ON" : "DEBUG: Mapping OFF"}
                     </button>
+                    {debugMappingActive && debugHover && (
+                      <div className="mt-2 text-[11px] text-slate-400">
+                        Hover: <span className="text-slate-200 font-semibold">#{debugHover.id}</span>{" "}
+                        <span className="text-slate-500">
+                          ({debugHover.nx}, {debugHover.ny})
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
               {(toolMode as ToolMode) === "ocr" && (
@@ -1055,7 +1115,9 @@ export default function App() {
           {/* Q2 */}
           <section className="col-span-12 lg:col-span-5 h-full rounded-2xl border border-slate-900 bg-slate-950/40 p-5 flex flex-col gap-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-100">2. Imagen original</h2>
+              <h2 className="text-sm font-semibold text-slate-100">
+                {(toolMode as ToolMode) === "ocr" ? "2. Galería" : "2. Imagen original"}
+              </h2>
                 <span className="text-[11px] text-slate-500">
                 {(toolMode as ToolMode) === "sam3"
                   ? file
@@ -1067,7 +1129,47 @@ export default function App() {
               </span>
             </div>
 
-            <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center">
+            {(toolMode as ToolMode) === "ocr" ? (
+              <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden p-3">
+                {ocrCards.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-slate-500 text-sm px-6 text-center">
+                    Sube 1 a 10 imágenes para ver la galería aquí (sin correr OCR).
+                  </div>
+                ) : (
+                  <div className="ocrGrid">
+                    {ocrCards.map((c, idx) => {
+                      const showResult = !!c.resultB64;
+                      const imgSrc = showResult ? `data:image/png;base64,${c.resultB64}` : c.originalUrl;
+
+                      const key = (c.codes?.[0] ?? "").trim() || (showResult ? "SIN LECTURA" : "PENDIENTE");
+                      const conf = c.confidence != null ? `${Math.round(c.confidence * 100)}%` : "--";
+                      const status = c.status ?? (showResult ? "RECHAZADO" : "DUDOSO");
+
+                      return (
+                        <div key={`${c.filename}-${idx}`} className="ocrCard">
+                          <div className="ocrThumbWrap">
+                            <img className="ocrThumb" src={imgSrc} alt={c.filename} />
+                          </div>
+
+                          {/* Pie de imagen */}
+                          <div className="ocrMeta">
+                            <div className="ocrKeyRow">
+                              <span className="ocrKey">{key}</span>
+                              <span className="ocrStatus">{status}</span>
+                            </div>
+                            <div className="ocrSubRow">
+                              <span className="ocrFile">{c.filename}</span>
+                              <span className="ocrConf">{showResult ? conf : ""}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex-1 rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center">
               {originalSrc ? (
                 <img src={originalSrc} alt="Imagen original" className="max-h-full max-w-full object-contain" />
               ) : (
@@ -1077,7 +1179,8 @@ export default function App() {
                     : "Sube 1 a 10 imágenes para OCR y luego ejecuta extracción."}
                 </div>
               )}
-            </div>
+              </div>
+            )}
           </section>
 
           {/* Right column */}
@@ -1122,137 +1225,35 @@ export default function App() {
                       Sube imágenes y ejecuta <span className="font-semibold mx-1">“Extraer claves (OCR)”</span>.
                     </div>
                   ) : (
-                    <div className="flex-1 grid grid-cols-12 gap-3 p-3">
-                      {/* Lista de items */}
-                      <div className="col-span-5 rounded-2xl border border-slate-900 bg-slate-950/40 overflow-hidden flex flex-col">
-                        <div className="px-3 py-2 bg-slate-900/60 flex items-center justify-between">
-                          <span className="text-[11px] font-semibold text-slate-200">Imágenes</span>
-                          <span className="text-[11px] text-slate-400">{ocrResult.items.length}</span>
-                        </div>
-
-                        <div className="grid grid-cols-3 px-3 py-2 text-[11px] text-slate-400 border-t border-slate-900/70">
-                          <span>Idx</span>
-                          <span>Claves</span>
-                          <span className="text-right">#</span>
-                        </div>
-
-                        <div className="flex-1 overflow-auto">
-                          {ocrResult.items.map((it, idx) => {
-                            const active = idx === ocrSelectedIdx;
-                            return (
-                              <button
-                                key={`${it.filename}-${idx}`}
-                                className={`w-full text-left grid grid-cols-3 px-3 py-2 text-[11px] border-t border-slate-900/60 transition ${
-                                  active ? "bg-emerald-500/10" : "hover:bg-slate-200/5"
-                                }`}
-                                onClick={() => setOcrSelectedIdx(idx)}
-                                type="button"
-                              >
-                                <span className="text-slate-200 font-semibold">{idx + 1}</span>
-                                <span className="text-slate-300 truncate" title={(it.codes ?? []).join(" | ")}>
-                                  {(it.codes ?? []).join(" | ") || "--"}
-                                </span>
-                                <span className="text-right text-slate-200">{(it.codes ?? []).length}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Detalle del seleccionado */}
-                      <div className="col-span-7 rounded-2xl border border-slate-900 bg-slate-950/40 overflow-hidden flex flex-col">
-                        <div className="px-3 py-2 bg-slate-900/60 flex items-center justify-between">
-                          <div className="min-w-0">
-                            <div className="text-[11px] text-slate-400">Seleccionado</div>
-                            <div className="text-[11px] text-slate-200 font-semibold truncate">
-                              {ocrSelectedItem?.filename ?? "--"}
-                            </div>
-                          </div>
-                          <div className="text-[11px] text-slate-400">
-                            {ocrSelectedIdx + 1}/{ocrResult.items.length}
-                          </div>
-                        </div>
-
-                        <div className="p-3 flex-1 flex flex-col gap-3 overflow-auto">
-                          {/* Preview con boxes */}
-                          <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden flex items-center justify-center">
-                            {ocrPreviewSrc ? (
-                              <img src={ocrPreviewSrc} alt="OCR preview" className="max-h-[320px] w-auto object-contain" />
-                            ) : (
-                              <div className="text-[11px] text-slate-500 px-4 py-10 text-center">
-                                No hay preview_b64 disponible (backend aún no lo genera).
+                    <div className="p-3">
+                      <div className="ocrGrid">
+                        {ocrResult.items.slice(0, 10).map((it, idx) => {
+                          const thumb = it.preview_b64 ? `data:image/png;base64,${it.preview_b64}` : null;
+                          const key = (it.codes?.[0] ?? "").trim() || "SIN LECTURA";
+                          const conf = it.confidence != null ? `${Math.round(it.confidence * 100)}%` : "--";
+                          const status = it.status ?? "RECHAZADO";
+                          return (
+                            <div key={`${it.filename}-${idx}`} className="ocrCard">
+                              <div className="ocrThumbWrap">
+                                {thumb ? (
+                                  <img className="ocrThumb" src={thumb} alt={it.filename} />
+                                ) : (
+                                  <div className="ocrThumbPlaceholder">No preview</div>
+                                )}
                               </div>
-                            )}
-                          </div>
-
-                          {/* Codes */}
-                          <div className="rounded-2xl border border-slate-900 bg-black/35 p-3">
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-[11px] font-semibold text-slate-200">Claves detectadas</span>
-                              <span className="text-[11px] text-slate-400">{(ocrSelectedItem?.codes ?? []).length}</span>
-                            </div>
-
-                            {(ocrSelectedItem?.codes ?? []).length === 0 ? (
-                              <div className="text-[11px] text-slate-500">--</div>
-                            ) : (
-                              <div className="flex flex-wrap gap-2">
-                                {(ocrSelectedItem?.codes ?? []).map((c) => (
-                                  <span
-                                    key={c}
-                                    className="text-[11px] px-2 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-200"
-                                  >
-                                    {c}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Detections table */}
-                          <div className="rounded-2xl border border-slate-900 bg-black/35 overflow-hidden">
-                            <div className="px-3 py-2 bg-slate-900/60 flex items-center justify-between">
-                              <span className="text-[11px] font-semibold text-slate-200">Detections</span>
-                              <span className="text-[11px] text-slate-400">{ocrDetections.length}</span>
-                            </div>
-
-                            <div className="grid grid-cols-3 px-3 py-2 text-[11px] text-slate-400 border-t border-slate-900/70">
-                              <span>Text</span>
-                              <span>Clean</span>
-                              <span className="text-right">Conf</span>
-                            </div>
-
-                            <div className="max-h-[160px] overflow-auto">
-                              {ocrDetections.length === 0 ? (
-                                <div className="px-3 py-3 text-[11px] text-slate-500">
-                                  Sin detecciones (o backend aún no devuelve detections).
+                              <div className="ocrMeta">
+                                <div className="ocrKeyRow">
+                                  <span className="ocrKey">{key}</span>
+                                  <span className="ocrStatus">{status}</span>
                                 </div>
-                              ) : (
-                                ocrDetections.map((d, i) => (
-                                  <div
-                                    key={`${d.clean || d.text}-${i}`}
-                                    className="grid grid-cols-3 px-3 py-2 text-[11px] border-t border-slate-900/60"
-                                  >
-                                    <span className="text-slate-200 truncate" title={d.text}>
-                                      {d.text}
-                                    </span>
-                                    <span className="text-slate-300 truncate" title={d.clean}>
-                                      {d.clean}
-                                    </span>
-                                    <span className="text-right text-slate-200">{(d.conf ?? 0).toFixed(2)}</span>
-                                  </div>
-                                ))
-                              )}
+                                <div className="ocrSubRow">
+                                  <span className="ocrFile">{it.filename}</span>
+                                  <span className="ocrConf">{conf}</span>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-
-                          {/* Raw text */}
-                          <div className="rounded-2xl border border-slate-900 bg-black/35 p-3">
-                            <div className="text-[11px] font-semibold text-slate-200 mb-2">Raw text</div>
-                            <pre className="text-[11px] text-slate-300 whitespace-pre-wrap break-words">
-                              {ocrSelectedItem?.raw_text ?? "--"}
-                            </pre>
-                          </div>
-                        </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}

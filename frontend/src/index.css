@@ -47,3 +47,226 @@ body {
     );
   background-size: 200% 200%;
 }
+
+/* ===== OCR Netflix-like Gallery ===== */
+.ocrGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.ocrCard {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(10, 10, 15, 0.55);
+  border-radius: 14px;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.ocrCard:hover {
+  transform: translateY(-2px);
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+.ocrThumbWrap {
+  aspect-ratio: 16/9;
+  overflow: hidden;
+  background: #0b0b10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ocrThumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ocrThumbPlaceholder {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.ocrMeta {
+  padding: 10px 12px 12px;
+}
+
+.ocrKeyRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.ocrKey {
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.ocrStatus {
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.ocrSubRow {
+  margin-top: 6px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  opacity: 0.85;
+}
+
+.ocrFile {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 75%;
+}
+
+.ocrConf {
+  font-size: 12px;
+}
+
+.ocrCard--ok .ocrStatus { color: #2ee59d; }
+.ocrCard--dudoso .ocrStatus { color: #f6c85f; }
+.ocrCard--rechazado .ocrStatus { color: #ff6b6b; }
+
+/* ===== Modal ===== */
+.ocrModalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 9999;
+}
+
+.ocrModal {
+  width: min(1100px, 96vw);
+  background: #0b0b10;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.ocrModalHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ocrModalTitle {
+  font-weight: 900;
+}
+
+.ocrModalSubtitle {
+  margin-top: 6px;
+  opacity: 0.9;
+  font-size: 12px;
+}
+
+.ocrPill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+}
+
+.ocrClose {
+  background: transparent;
+  color: white;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.ocrModalBody {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 14px;
+  padding: 14px 16px 16px;
+}
+
+.ocrModalImgs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ocrBig {
+  width: 100%;
+  height: 420px;
+  object-fit: contain;
+  background: #05050a;
+  border-radius: 12px;
+}
+
+.ocrBigPlaceholder {
+  height: 420px;
+  border-radius: 12px;
+  background: #05050a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+}
+
+.ocrDetections {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.ocrSectionTitle {
+  font-weight: 800;
+  margin-bottom: 8px;
+  font-size: 12px;
+  opacity: 0.95;
+}
+
+.ocrTableWrap {
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+.ocrTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.ocrTable th, .ocrTable td {
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  vertical-align: top;
+}
+
+.ocrTable th {
+  text-align: left;
+  opacity: 0.85;
+}
+
+.ocrRaw {
+  font-size: 11px;
+  opacity: 0.9;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+}
