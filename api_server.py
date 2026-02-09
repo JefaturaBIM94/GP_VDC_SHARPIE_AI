@@ -8,9 +8,11 @@ from io import BytesIO
 import base64
 import json
 import datetime
+import os
 import uuid
 import re
 
+import anyio
 import numpy as np
 from PIL import Image
 
@@ -539,12 +541,12 @@ def _pattern_score_from_text(text_lr: str) -> float:
     return score
 
 
-def _run_easyocr(proc_img: np.ndarray) -> list:
+def _run_easyocr(proc_img: np.ndarray, decoder: str = "beamsearch") -> list:
     return ocr_reader.readtext(
         proc_img,
         detail=1,
         paragraph=False,
-        decoder="beamsearch",
+        decoder=decoder,
         allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.",
         text_threshold=0.6,
         low_text=0.35,
@@ -562,6 +564,17 @@ def _apply_orientation(bgr: np.ndarray, k_rot90: int, flip: bool) -> np.ndarray:
 
 
 OcrStatus = Literal["OK", "DUDOSO", "RECHAZADO"]
+
+
+def _resize_max_side(bgr: np.ndarray, max_side: int = 1280) -> np.ndarray:
+    h, w = bgr.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return bgr
+    scale = max_side / float(m)
+    nw = int(round(w * scale))
+    nh = int(round(h * scale))
+    return cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
 
 
 def _aggregate_confidence(dets: list) -> float:
@@ -673,7 +686,87 @@ def _final_conf_and_status(dets: list, codes: list[str]) -> tuple[float, OcrStat
     return conf, "RECHAZADO"
 
 
-def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
+def _preprocess_variants_fast_for_ocr(bgr: np.ndarray) -> List[np.ndarray]:
+    out: List[np.ndarray] = []
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    g1 = clahe.apply(gray)
+    out.append(g1)
+
+    # Black-hat: muy útil en grabado metálico
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    blackhat = cv2.morphologyEx(g1, cv2.MORPH_BLACKHAT, kernel)
+    out.append(blackhat)
+
+    # Unsharp barato
+    blur = cv2.GaussianBlur(g1, (0, 0), 1.2)
+    unsharp = cv2.addWeighted(g1, 1.8, blur, -0.8, 0)
+    out.append(unsharp)
+
+    return out
+
+
+def _preprocess_variants_slow_for_ocr(bgr: np.ndarray) -> List[np.ndarray]:
+    out: List[np.ndarray] = []
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    g1 = clahe.apply(gray)
+    out.append(g1)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    blackhat = cv2.morphologyEx(g1, cv2.MORPH_BLACKHAT, kernel)
+    out.append(blackhat)
+
+    blur_big = cv2.GaussianBlur(g1, (0, 0), 9.0)
+    norm = cv2.divide(g1, blur_big + 1, scale=255)
+    out.append(norm)
+
+    blur = cv2.GaussianBlur(g1, (0, 0), 1.2)
+    unsharp = cv2.addWeighted(g1, 1.8, blur, -0.8, 0)
+    out.append(unsharp)
+
+    gx = cv2.Sobel(unsharp, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(unsharp, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    out.append(mag)
+
+    thr = cv2.adaptiveThreshold(
+        unsharp, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 7
+    )
+    out.append(thr)
+    out.append(255 - thr)
+
+    return out
+
+
+def _extract_codes_with_optional_postprocess(text_lr_norm: str, dets: list) -> tuple[list[str], dict | None]:
+    codes_base = _extract_codes(text_lr_norm)
+
+    pp_debug = None
+    if _HAS_OCR_POSTPROCESS and pick_best_codes is not None:
+        try:
+            det_tokens_lr = [
+                clean_token(d[1]) for d in sorted(dets, key=lambda d: _bbox_center_x(d[0]))
+            ]  # type: ignore
+            codes_pp, pp_debug = pick_best_codes(text_lr_norm, det_tokens_lr=det_tokens_lr)  # type: ignore
+            return (codes_pp or codes_base), pp_debug
+        except Exception:
+            return codes_base, None
+
+    return codes_base, None
+
+
+def _best_ocr_stage(
+    bgr_in: np.ndarray,
+    *,
+    orientations: list[tuple[int, bool]],
+    preprocess_fn,
+    decoder: str,
+    deskew: bool,
+) -> dict:
     best_global = {
         "score": -1.0,
         "dets": [],
@@ -685,8 +778,6 @@ def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
         "orientation": {"rot90_k": 0, "flip_h": False, "skew_deg": 0.0},
     }
 
-    orientations = [(k, f) for k in [0, 1, 2, 3] for f in [False, True]]
-
     for k_rot90, flip_h in orientations:
         bgr = _apply_orientation(bgr_in, k_rot90, flip_h)
         bgr_canvas = _add_white_frame(bgr, pad_frac=0.10)
@@ -695,7 +786,8 @@ def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         base = clahe.apply(base_gray)
 
-        dets0 = _run_easyocr(base)
+        # ROI cheap: un pase rápido para ubicar bbox.
+        dets0 = _run_easyocr(base, decoder="greedy")
         h0, w0 = bgr_canvas.shape[:2]
         roi = _union_boxes(dets0, w0, h0, pad_frac=0.15)
         if roi is None:
@@ -704,14 +796,17 @@ def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
         x0, y0, x1, y1 = roi
         bgr_roi0 = bgr_canvas[y0:y1 + 1, x0:x1 + 1].copy()
 
-        gray_roi0 = cv2.cvtColor(bgr_roi0, cv2.COLOR_BGR2GRAY)
-        skew = _estimate_text_angle(gray_roi0)
-        bgr_roi = _rotate_affine(bgr_roi0, angle_deg=skew)
+        skew = 0.0
+        bgr_roi = bgr_roi0
+        if deskew:
+            gray_roi0 = cv2.cvtColor(bgr_roi0, cv2.COLOR_BGR2GRAY)
+            skew = _estimate_text_angle(gray_roi0)
+            bgr_roi = _rotate_affine(bgr_roi0, angle_deg=skew)
 
         best_local = {"score": -1.0, "dets": [], "text_lr": "", "raw_text": "", "preview_bgr": bgr_roi}
 
-        for proc in _preprocess_variants_for_ocr(bgr_roi):
-            dets = _run_easyocr(proc)
+        for proc in preprocess_fn(bgr_roi):
+            dets = _run_easyocr(proc, decoder=decoder)
             text_lr = _assemble_left_to_right(dets)
             raw_text = " ".join([d[1] for d in dets if isinstance(d[1], str)])
 
@@ -730,20 +825,7 @@ def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
                 }
 
         text_lr_norm = _stitch_common_patterns(best_local["text_lr"] or "")
-        codes_base = _extract_codes(text_lr_norm)
-
-        pp_debug = None
-        if _HAS_OCR_POSTPROCESS and pick_best_codes is not None:
-            try:
-                det_tokens_lr = [
-                    clean_token(d[1]) for d in sorted(best_local["dets"], key=lambda d: _bbox_center_x(d[0]))
-                ]  # type: ignore
-                codes_pp, pp_debug = pick_best_codes(text_lr_norm, det_tokens_lr=det_tokens_lr)  # type: ignore
-                codes = codes_pp or codes_base
-            except Exception:
-                codes = codes_base
-        else:
-            codes = codes_base
+        codes, pp_debug = _extract_codes_with_optional_postprocess(text_lr_norm, best_local["dets"])
 
         final_score = best_local["score"] + (10.0 if len(codes) > 0 else 0.0)
 
@@ -764,6 +846,131 @@ def _best_ocr_on_bgr(bgr_in: np.ndarray) -> dict:
     return best_global
 
 
+def _status_rank(s: OcrStatus) -> int:
+    if s == "OK":
+        return 2
+    if s == "DUDOSO":
+        return 1
+    return 0
+
+
+def _best_ocr_on_bgr_fast_then_slow(bgr_in: np.ndarray) -> dict:
+    fast_orientations = [(0, False), (1, False), (3, False)]
+    slow_orientations = fast_orientations + [(2, False), (0, True)]
+
+    fast = _best_ocr_stage(
+        bgr_in,
+        orientations=fast_orientations,
+        preprocess_fn=_preprocess_variants_fast_for_ocr,
+        decoder="greedy",
+        deskew=False,
+    )
+    fast_conf, fast_status = _final_conf_and_status(fast["dets"], fast.get("codes") or [])
+    fast["final_confidence"] = float(fast_conf)
+    fast["final_status"] = fast_status
+    fast["stage"] = "fast"
+
+    if fast_status == "OK":
+        return fast
+
+    slow = _best_ocr_stage(
+        bgr_in,
+        orientations=slow_orientations,
+        preprocess_fn=_preprocess_variants_slow_for_ocr,
+        decoder="beamsearch",
+        deskew=True,
+    )
+    slow_conf, slow_status = _final_conf_and_status(slow["dets"], slow.get("codes") or [])
+    slow["final_confidence"] = float(slow_conf)
+    slow["final_status"] = slow_status
+    slow["stage"] = "slow"
+
+    if _status_rank(slow_status) > _status_rank(fast_status):
+        return slow
+    if _status_rank(slow_status) < _status_rank(fast_status):
+        return fast
+    if float(slow_conf) > float(fast_conf):
+        return slow
+    return fast
+
+
+def _build_item_from_best(filename: str, best: dict) -> dict:
+    preview = best["preview_bgr"].copy()
+    for (bbox, text, conf) in best["dets"]:
+        t = clean_token(text)  # type: ignore
+        if not t:
+            continue
+        pts = np.array(bbox, dtype=np.int32)
+        cv2.polylines(preview, [pts], True, (0, 255, 0), 3)
+        cv2.putText(
+            preview,
+            f"{t} ({float(conf):.2f})",
+            (pts[0][0], max(0, pts[0][1] - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    preview_b64 = _bgr_to_b64png(preview)
+
+    det_json = []
+    for (bbox, text, conf) in best["dets"]:
+        det_json.append(
+            {
+                "text": text,
+                "clean": clean_token(text),  # type: ignore
+                "conf": float(conf),
+                "bbox": [[float(p[0]), float(p[1])] for p in bbox],
+            }
+        )
+
+    codes = best.get("codes") or []
+    final_conf = float(best.get("final_confidence", 0.0))
+    status = best.get("final_status", "RECHAZADO")
+
+    processed_at = datetime.datetime.now().isoformat(timespec="seconds")
+
+    debug_obj = {
+        "stage": best.get("stage", ""),
+        "roi_xyxy_on_canvas": best.get("roi_xyxy"),
+        "orientation": best.get("orientation"),
+        "final_score": best.get("score"),
+    }
+    if "postprocess_debug" in best:
+        debug_obj["postprocess"] = best["postprocess_debug"]
+
+    return {
+        "filename": filename,
+        "raw_text": best.get("text_lr") or best.get("raw_text") or "",
+        "codes": codes,
+        "confidence": final_conf,
+        "status": status,
+        "detections": det_json,
+        "preview_b64": preview_b64,
+        "processed_at": processed_at,
+        "debug": debug_obj,
+    }
+
+
+def _process_one_bytes(filename: str, data: bytes, max_side: int) -> dict:
+    if not data:
+        raise ValueError("empty upload")
+
+    pil = Image.open(BytesIO(data)).convert("RGB")
+    bgr0 = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    bgr0 = _resize_max_side(bgr0, max_side=max_side)
+
+    best = _best_ocr_on_bgr_fast_then_slow(bgr0)
+    return _build_item_from_best(filename, best)
+
+
+_OCR_MAX_SIDE = int(os.environ.get("OCR_MAX_SIDE", "1280"))
+_OCR_MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_MAX_CONCURRENCY", "1")))
+_OCR_SEM = anyio.Semaphore(_OCR_MAX_CONCURRENCY)
+
+
 # ==========================
 # OCR Batch (claves de montaje)
 # ==========================
@@ -777,69 +984,19 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
 
     for f in images:
         content = await f.read()
-        pil = Image.open(BytesIO(content)).convert("RGB")
-        bgr0 = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-
-        best = _best_ocr_on_bgr(bgr0)
-
-        preview = best["preview_bgr"].copy()
-        for (bbox, text, conf) in best["dets"]:
-            t = clean_token(text)  # type: ignore
-            if not t:
-                continue
-            pts = np.array(bbox, dtype=np.int32)
-            cv2.polylines(preview, [pts], True, (0, 255, 0), 3)
-            cv2.putText(
-                preview,
-                f"{t} ({float(conf):.2f})",
-                (pts[0][0], max(0, pts[0][1] - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
+        await _OCR_SEM.acquire()
+        try:
+            item = await anyio.to_thread.run_sync(
+                _process_one_bytes,
+                f.filename or "image",
+                content,
+                _OCR_MAX_SIDE,
             )
+        finally:
+            _OCR_SEM.release()
 
-        preview_b64 = _bgr_to_b64png(preview)
-
-        det_json = []
-        for (bbox, text, conf) in best["dets"]:
-            det_json.append(
-                {
-                    "text": text,
-                    "clean": clean_token(text),  # type: ignore
-                    "conf": float(conf),
-                    "bbox": [[float(p[0]), float(p[1])] for p in bbox],
-                }
-            )
-
-        codes = best["codes"] or []
-        global_codes.extend(codes)
-
-        final_conf, status = _final_conf_and_status(best["dets"], codes)
-        processed_at = datetime.datetime.now().isoformat(timespec="seconds")
-
-        debug_obj = {
-            "roi_xyxy_on_canvas": best.get("roi_xyxy"),
-            "orientation": best.get("orientation"),
-            "final_score": best.get("score"),
-        }
-        if "postprocess_debug" in best:
-            debug_obj["postprocess"] = best["postprocess_debug"]
-
-        items.append(
-            {
-                "filename": f.filename,
-                "raw_text": best["text_lr"] or best["raw_text"] or "",
-                "codes": codes,
-                "confidence": final_conf,
-                "status": status,
-                "detections": det_json,
-                "preview_b64": preview_b64,
-                "processed_at": processed_at,
-                "debug": debug_obj,
-            }
-        )
+        items.append(item)
+        global_codes.extend(item.get("codes") or [])
 
     seen = set()
     unique_codes = []
@@ -874,70 +1031,19 @@ async def ocr_batch_stream(images: List[UploadFile] = File(...)):
                 if not data:
                     raise ValueError("empty upload")
 
-                pil = Image.open(BytesIO(data)).convert("RGB")
-                bgr0 = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-
-                best = _best_ocr_on_bgr(bgr0)
-
-                preview = best["preview_bgr"].copy()
-                for (bbox, text, conf) in best["dets"]:
-                    t = clean_token(text)  # type: ignore
-                    if not t:
-                        continue
-                    pts = np.array(bbox, dtype=np.int32)
-                    cv2.polylines(preview, [pts], True, (0, 255, 0), 3)
-                    cv2.putText(
-                        preview,
-                        f"{t} ({float(conf):.2f})",
-                        (pts[0][0], max(0, pts[0][1] - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 0),
-                        2,
-                        cv2.LINE_AA,
+                await _OCR_SEM.acquire()
+                try:
+                    item = await anyio.to_thread.run_sync(
+                        _process_one_bytes,
+                        filename or "image",
+                        data,
+                        _OCR_MAX_SIDE,
                     )
+                finally:
+                    _OCR_SEM.release()
 
-                preview_b64 = _bgr_to_b64png(preview)
-
-                det_json = []
-                for (bbox, text, conf) in best["dets"]:
-                    det_json.append(
-                        {
-                            "text": text,
-                            "clean": clean_token(text),  # type: ignore
-                            "conf": float(conf),
-                            "bbox": [[float(p[0]), float(p[1])] for p in bbox],
-                        }
-                    )
-
-                codes = best["codes"] or []
-                final_conf, status = _final_conf_and_status(best["dets"], codes)
-
-                processed_at = datetime.datetime.now().isoformat(timespec="seconds")
-
-                debug_obj = {
-                    "roi_xyxy_on_canvas": best.get("roi_xyxy"),
-                    "orientation": best.get("orientation"),
-                    "final_score": best.get("score"),
-                }
-                if "postprocess_debug" in best:
-                    debug_obj["postprocess"] = best["postprocess_debug"]
-
-                item = {
-                    "type": "item",
-                    "index": idx,
-                    "filename": filename,
-                    "raw_text": best["text_lr"] or best["raw_text"] or "",
-                    "codes": codes,
-                    "confidence": final_conf,
-                    "status": status,
-                    "detections": det_json,
-                    "preview_b64": preview_b64,
-                    "processed_at": processed_at,
-                    "debug": debug_obj,
-                }
-
-                yield json.dumps(item) + "\n"
+                yield json.dumps({"type": "item", "index": idx, **item}) + "\n"
+                continue
             except Exception as e:
                 # ✅ No mates el stream: reporta error por item
                 yield json.dumps(

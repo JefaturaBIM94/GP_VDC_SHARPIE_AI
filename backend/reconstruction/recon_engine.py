@@ -21,6 +21,8 @@ cv2.setNumThreads(0)
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
+PIL_RESAMPLE_BILINEAR = getattr(getattr(Image, "Resampling", Image), "BILINEAR", 2)
+
 
 def _encode_png_b64(pil_img: Image.Image) -> str:
     buf = BytesIO()
@@ -232,7 +234,7 @@ class DepthAnythingEngine:
         if scale < 1.0:
             new_w = max(1, int(w * scale))
             new_h = max(1, int(h * scale))
-            img = img.resize((new_w, new_h), Image.BILINEAR)
+            img = img.resize((new_w, new_h), resample=PIL_RESAMPLE_BILINEAR)
         t_resize = time.perf_counter()
 
         print("[FASTRECON] engine: START predict_depth")
