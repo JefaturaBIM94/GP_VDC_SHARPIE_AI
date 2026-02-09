@@ -1,0 +1,14 @@
+torch
+torchvision
+numpy<2
+pillow
+opencv-python
+einops
+tqdm
+huggingface-hub
+safetensors
+omegaconf
+plyfile
+open3d
+pycolmap
+trimesh

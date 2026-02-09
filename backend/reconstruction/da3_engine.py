@@ -4,13 +4,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import base64
+import sys
 import tempfile
 
 import numpy as np
 from PIL import Image
 import torch
 
-from .recon_engine import _encode_png_b64  # reutiliza tu helper actual (o muévelo a utils)
+from .recon_engine import PIL_RESAMPLE_BILINEAR, _encode_png_b64  # reutiliza tu helper actual (o muévelo a utils)
 import cv2
 
 
@@ -29,10 +30,35 @@ class DepthAnything3Engine:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._model = None
 
+    def _ensure_da3_on_path(self) -> None:
+        try:
+            import depth_anything_3  # noqa: F401
+            return
+        except ModuleNotFoundError:
+            pass
+
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            repo_root / "depth-anything-3" / "src",
+            repo_root / "external" / "Depth-Anything-3" / "src",
+        ]
+        for p in candidates:
+            if p.exists():
+                sys.path.insert(0, str(p))
+                break
+
     def load(self):
         if self._model is not None:
             return
-        from depth_anything_3.api import DepthAnything3  # noqa
+        self._ensure_da3_on_path()
+        try:
+            from depth_anything_3.api import DepthAnything3  # type: ignore
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "No se pudo importar 'depth_anything_3'. "
+                "Opciones: (1) instala editable: `pip install -e depth-anything-3` "
+                "o (2) asegúrate de tener el repo en `depth-anything-3/src` o `external/Depth-Anything-3/src`."
+            ) from e
         self._model = DepthAnything3.from_pretrained(self.model_id).to(device=self.device)
 
     @torch.no_grad()
@@ -81,7 +107,10 @@ class DepthAnything3Engine:
         w, h = img.size
         scale = min(1.0, float(max_res) / float(max(w, h)))
         if scale < 1.0:
-            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
+            img = img.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                resample=PIL_RESAMPLE_BILINEAR,
+            )
 
         res = self.infer_one(img, export_format=("ply" if return_ply else "npz"))
         depth_png_b64 = self.depth_to_png_b64(res.depth)
