@@ -1,7 +1,18 @@
 # sam3_engine.py
+from __future__ import annotations
+
 import torch
 from PIL import Image
-from transformers import Sam3Processor, Sam3Model
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from transformers import Sam3Processor, Sam3Model  # type: ignore
+
+try:
+    from transformers import Sam3Processor, Sam3Model  # type: ignore
+except Exception:
+    Sam3Processor: Any = None  # type: ignore
+    Sam3Model: Any = None  # type: ignore
 
 
 class Sam3Engine:
@@ -12,6 +23,11 @@ class Sam3Engine:
     """
 
     def __init__(self, model_name: str = "facebook/sam3"):
+        if Sam3Processor is None or Sam3Model is None:
+            raise ImportError(
+                "Sam3Processor/Sam3Model no disponibles en tu instalación de transformers. "
+                "Verifica la versión o el package que provee SAM3."
+            )
         # Detectar si hay GPU
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[Sam3Engine] Inicializando SAM3 en dispositivo: {self.device}")

@@ -5,7 +5,7 @@ import uuid
 import base64
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -164,7 +164,11 @@ async def api_segment(
     - sessions_history: listado de sesiones (para panel de historial)
     """
     contents = await file.read()
-    image_pil = Image.open(io.BytesIO(contents)).convert("RGB")
+    image_pil = Image.open(io.BytesIO(contents))
+    image_pil2 = ImageOps.exif_transpose(image_pil)  # match browser orientation (EXIF)
+    if image_pil2 is None:
+        image_pil2 = image_pil
+    image_pil = image_pil2.convert("RGB")
 
     # Manejo de sesión
     if not session_id or force_new_session:

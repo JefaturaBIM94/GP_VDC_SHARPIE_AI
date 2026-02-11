@@ -256,6 +256,8 @@ class DepthAnythingEngine:
         stride = max(1, int(stride))
         ply_b64 = ""
         ply_preview_b64 = ""
+        t_ply_prev: float = 0.0
+        t_ply_bin: float = 0.0
 
         if make_ply:
             print("[FASTRECON] engine: START ply (ascii preview + binary)")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +116,8 @@ class SessionStore:
             threshold=float(threshold),
             num_objects=int(num_objects),
         )
+        if session_id is None:
+            raise ValueError("session_id is required after session creation")
         return self.append_segment(session_id=session_id, segment=seg)
 
     def list_sessions(self) -> List[Dict[str, Any]]:
@@ -126,3 +129,37 @@ class SessionStore:
             except Exception:
                 continue
         return out
+
+
+# ------------------------
+# Module-level convenience API (used by backend/main.py and tests)
+# ------------------------
+DATA_DIR = Path(os.environ.get("SAM3_DATA_DIR", "data"))
+IMAGES_DIR = str(DATA_DIR / "images")
+SESSIONS_DIR = str(DATA_DIR / "sessions")
+_STORE = SessionStore(DATA_DIR)
+
+
+def create_session(*, image_filename: str) -> Dict[str, Any]:
+    return _STORE.create_session(image_filename=image_filename)
+
+
+def load_session(session_id: str) -> Dict[str, Any]:
+    data = _STORE.get_session(session_id)
+    if data is None:
+        raise FileNotFoundError(f"Session {session_id} not found")
+    return data
+
+
+def save_session(session_data: Dict[str, Any]) -> None:
+    session_id = str(session_data.get("session_id") or "")
+    if not session_id:
+        raise ValueError("session_data.session_id is required")
+
+    path = _STORE._session_path(session_id)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(session_data, f, indent=2)
+
+
+def list_sessions() -> List[Dict[str, Any]]:
+    return _STORE.list_sessions()

@@ -1,5 +1,5 @@
 # backend/reconstruction/routes.py
-from fastapi import APIRouter, File, UploadFile, Form
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from io import BytesIO
@@ -35,9 +35,14 @@ async def reconstruct_fast(
     content = await image.read()
     t1 = time.perf_counter()
     print("[FASTRECON] bytes:", len(content))
-    image_pil = Image.open(BytesIO(content))
-    image_pil = ImageOps.exif_transpose(image_pil)  # match browser orientation
-    image_pil = image_pil.convert("RGB")
+    try:
+        image_pil = Image.open(BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid image upload") from e
+    image_pil2 = ImageOps.exif_transpose(image_pil)  # match browser orientation
+    if image_pil2 is None:
+        image_pil2 = image_pil
+    image_pil = image_pil2.convert("RGB")
     t2 = time.perf_counter()
 
     result = _engine.reconstruct_fast(

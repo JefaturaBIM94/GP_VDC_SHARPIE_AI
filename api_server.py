@@ -11,10 +11,11 @@ import datetime
 import os
 import uuid
 import re
+import asyncio
 
 import anyio
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from sam3_engine import Sam3Engine
 from backend.reconstruction.routes import router as reconstruction_router
@@ -22,6 +23,7 @@ from backend.reconstruction.routes import router as reconstruction_router
 # OCR
 import cv2
 import easyocr
+from typing import Callable, cast
 
 # Optional external postprocess module (won't break if missing)
 _HAS_OCR_POSTPROCESS = False
@@ -52,6 +54,14 @@ engine = Sam3Engine()
 # OCR reader (1 sola vez)
 ocr_reader = easyocr.Reader(["en"], gpu=False)
 
+def _load_image_rgb(data: bytes) -> Image.Image:
+    img = Image.open(BytesIO(data))
+    img2 = ImageOps.exif_transpose(img)  # match browser orientation (EXIF)
+    # Some stubs type this as Optional[Image]; runtime returns an Image.
+    if img2 is None:
+        img2 = img
+    return img2.convert("RGB")
+
 
 # ==========================
 # SAM3 MODELS
@@ -69,6 +79,8 @@ class InstanceLabel(BaseModel):
 class SegmentResponse(BaseModel):
     session_id: str
     threshold: float
+    class_name: Optional[str] = None
+    num_objects: Optional[int] = None
 
     # Para UI moderna: overlay separado (RGBA) para dibujar ENCIMA de la original
     overlay_rgba_b64: str = ""  # PNG RGBA, fondo transparente
@@ -270,7 +282,7 @@ async def segment_image(
     threshold: float = Form(0.5),
 ):
     content = await file.read()
-    image_pil = Image.open(BytesIO(content)).convert("RGB")
+    image_pil = _load_image_rgb(content)
     return _segment_core(image_pil=image_pil, prompt_csv=prompt, threshold=threshold)
 
 
@@ -287,8 +299,8 @@ async def segment_compare(
     content_l = await file_left.read()
     content_r = await file_right.read()
 
-    img_l = Image.open(BytesIO(content_l)).convert("RGB")
-    img_r = Image.open(BytesIO(content_r)).convert("RGB")
+    img_l = _load_image_rgb(content_l)
+    img_r = _load_image_rgb(content_r)
 
     left = _segment_core(image_pil=img_l, prompt_csv=prompt, threshold=threshold)
     right = _segment_core(image_pil=img_r, prompt_csv=prompt, threshold=threshold)
@@ -329,6 +341,7 @@ def _clean_token(s: str) -> str:
 # If external ocr_postprocess not found, bind names to internal versions
 if clean_token is None:
     clean_token = _clean_token  # type: ignore
+clean_token = cast(Callable[[str], str], clean_token)
 
 
 _CODE_RE = re.compile(
@@ -413,7 +426,9 @@ def _estimate_text_angle(gray: np.ndarray) -> float:
     gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
     mag = cv2.magnitude(gx, gy)
-    mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    mag_norm = np.empty_like(mag, dtype=np.float32)
+    cv2.normalize(mag, mag_norm, 0, 255, cv2.NORM_MINMAX)
+    mag = mag_norm.astype(np.uint8)
 
     edges = cv2.Canny(mag, 60, 160)
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=60, minLineLength=40, maxLineGap=10)
@@ -505,7 +520,9 @@ def _preprocess_variants_for_ocr(bgr: np.ndarray) -> List[np.ndarray]:
     gx = cv2.Sobel(unsharp, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(unsharp, cv2.CV_32F, 0, 1, ksize=3)
     mag = cv2.magnitude(gx, gy)
-    mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    mag_norm = np.empty_like(mag, dtype=np.float32)
+    cv2.normalize(mag, mag_norm, 0, 255, cv2.NORM_MINMAX)
+    mag = mag_norm.astype(np.uint8)
     out.append(mag)
 
     mag_up = cv2.resize(mag, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
@@ -730,7 +747,9 @@ def _preprocess_variants_slow_for_ocr(bgr: np.ndarray) -> List[np.ndarray]:
     gx = cv2.Sobel(unsharp, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(unsharp, cv2.CV_32F, 0, 1, ksize=3)
     mag = cv2.magnitude(gx, gy)
-    mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    mag_norm = np.empty_like(mag, dtype=np.float32)
+    cv2.normalize(mag, mag_norm, 0, 255, cv2.NORM_MINMAX)
+    mag = mag_norm.astype(np.uint8)
     out.append(mag)
 
     thr = cv2.adaptiveThreshold(
@@ -746,7 +765,7 @@ def _extract_codes_with_optional_postprocess(text_lr_norm: str, dets: list) -> t
     codes_base = _extract_codes(text_lr_norm)
 
     pp_debug = None
-    if _HAS_OCR_POSTPROCESS and pick_best_codes is not None:
+    if _HAS_OCR_POSTPROCESS and pick_best_codes is not None and clean_token is not None:
         try:
             det_tokens_lr = [
                 clean_token(d[1]) for d in sorted(dets, key=lambda d: _bbox_center_x(d[0]))
@@ -958,7 +977,7 @@ def _process_one_bytes(filename: str, data: bytes, max_side: int) -> dict:
     if not data:
         raise ValueError("empty upload")
 
-    pil = Image.open(BytesIO(data)).convert("RGB")
+    pil = _load_image_rgb(data)
     bgr0 = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
     bgr0 = _resize_max_side(bgr0, max_side=max_side)
 
@@ -986,12 +1005,7 @@ async def ocr_batch(images: List[UploadFile] = File(...)):
         content = await f.read()
         await _OCR_SEM.acquire()
         try:
-            item = await anyio.to_thread.run_sync(
-                _process_one_bytes,
-                f.filename or "image",
-                content,
-                _OCR_MAX_SIDE,
-            )
+            item = await asyncio.to_thread(_process_one_bytes, f.filename or "image", content, _OCR_MAX_SIDE)
         finally:
             _OCR_SEM.release()
 
@@ -1033,12 +1047,7 @@ async def ocr_batch_stream(images: List[UploadFile] = File(...)):
 
                 await _OCR_SEM.acquire()
                 try:
-                    item = await anyio.to_thread.run_sync(
-                        _process_one_bytes,
-                        filename or "image",
-                        data,
-                        _OCR_MAX_SIDE,
-                    )
+                    item = await asyncio.to_thread(_process_one_bytes, filename or "image", data, _OCR_MAX_SIDE)
                 finally:
                     _OCR_SEM.release()
 
