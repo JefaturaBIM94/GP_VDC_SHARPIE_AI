@@ -10,12 +10,13 @@ import {
 } from "./api";
 import Sam3CompareView from "./views/Sam3CompareView";
 import FastReconstructionView from "./views/FastReconstructionView";
+import VideoTrackerView from "./views/VideoTrackerView";
 import { SegmentViewer } from "./components/SegmentViewer";
 import ResultSidePanel from "./components/ResultSidePanel";
 
 type CountMode = "simple" | "multi";
 type ChartType = "donut" | "pie" | "bubble";
-type ToolMode = "sam3" | "sam3_compare" | "ocr" | "fast_recon";
+type ToolMode = "sam3" | "sam3_compare" | "ocr" | "fast_recon" | "video_tracker";
 
 type OcrCard = {
   filename: string;
@@ -683,6 +684,14 @@ export default function App() {
 
           <button
             type="button"
+            onClick={() => onToolModeChange("video_tracker")}
+            className={`px-4 py-2 rounded-xl border ${toolMode === "video_tracker" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
+          >
+            Video Tracker
+          </button>
+
+          <button
+            type="button"
             onClick={() => onToolModeChange("ocr")}
             className={`px-4 py-2 rounded-xl border ${toolMode === "ocr" ? "bg-emerald-500 text-black" : "bg-black/30 text-slate-200 border-slate-800"}`}
           >
@@ -711,6 +720,8 @@ export default function App() {
           <Sam3CompareView />
         ) : toolMode === "fast_recon" ? (
           <FastReconstructionView />
+        ) : toolMode === "video_tracker" ? (
+          <VideoTrackerView />
         ) : toolMode === "sam3" ? (
           <div className="grid grid-cols-12 gap-4 h-[calc(100vh-110px)]">
             {/* Panel Izquierdo: controles compactos */}

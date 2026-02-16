@@ -80,6 +80,7 @@ function drawHoverEdges(
 export function SegmentViewer({
   title,
   file,
+  src,
   result,
   loading,
   hoverId: hoverIdProp,
@@ -87,12 +88,14 @@ export function SegmentViewer({
 }: {
   title: string;
   file: File | null;
+  src?: string | null;
   result: SegmentResponse | null;
   loading?: boolean;
   hoverId?: number;
   onHoverId?: (id: number) => void;
 }) {
-  const originalSrc = useObjectUrl(file);
+  const objectUrlSrc = useObjectUrl(src ? null : file);
+  const originalSrc = src ?? objectUrlSrc;
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
