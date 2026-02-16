@@ -5,7 +5,7 @@ import io
 from typing import List, Dict, Any
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps
 from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
@@ -39,7 +39,11 @@ async def ocr_batch(
     items = []
     for f in files:
         content = await f.read()
-        pil = Image.open(io.BytesIO(content)).convert("RGB")
+        pil = Image.open(io.BytesIO(content))
+        pil2 = ImageOps.exif_transpose(pil)  # match browser orientation (EXIF)
+        if pil2 is None:
+            pil2 = pil
+        pil = pil2.convert("RGB")
         res = ocr_engine.process_image(
             filename=f.filename or "image",
             pil_img=pil,

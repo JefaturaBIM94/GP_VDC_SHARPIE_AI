@@ -15,7 +15,36 @@ import cv2
 import easyocr
 
 # Matching
-from rapidfuzz import process, fuzz
+try:
+    from rapidfuzz import process, fuzz  # type: ignore
+except Exception:  # pragma: no cover
+    # Optional dependency. If it's not installed, fall back to difflib.
+    import difflib
+
+    def _ratio(a: str, b: str) -> float:
+        return difflib.SequenceMatcher(None, a, b).ratio() * 100.0
+
+    class _Fuzz:
+        @staticmethod
+        def WRatio(a: str, b: str) -> float:
+            return _ratio(a, b)
+
+    class _Process:
+        @staticmethod
+        def extractOne(query: str, choices, scorer):
+            best_key = None
+            best_score = -1.0
+            for ch in choices:
+                s = float(scorer(query, ch))
+                if s > best_score:
+                    best_score = s
+                    best_key = ch
+            if best_key is None:
+                return None
+            return (best_key, best_score, None)
+
+    process = _Process()
+    fuzz = _Fuzz()
 
 
 CODE_REGEX = re.compile(r"[A-Z0-9]+(?:[-_][A-Z0-9]+)+", re.IGNORECASE)
@@ -72,8 +101,8 @@ class OcrEngine:
     def run_ocr(self, pil_img: Image.Image) -> str:
         # EasyOCR trabaja con numpy
         img = np.array(pil_img.convert("RGB"))
-        chunks = self.reader.readtext(img, detail=0)  # solo strings
-        return "\n".join(chunks)
+        chunks = self.reader.readtext(img, detail=0)
+        return "\n".join(str(x) for x in chunks if x is not None)
 
     def extract_candidates(self, raw_text: str) -> List[str]:
         raw_text_n = _normalize(raw_text)
