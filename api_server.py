@@ -19,6 +19,7 @@ from PIL import Image, ImageOps
 
 from sam3_engine import Sam3Engine
 from backend.reconstruction.routes import router as reconstruction_router
+from backend.video_routes import router as video_router
 
 # OCR
 import cv2
@@ -48,6 +49,8 @@ app.add_middleware(
 
 # Register reconstruction routes (reconstruct-fast)
 app.include_router(reconstruction_router)
+# Register video routes (/video/*)
+app.include_router(video_router)
 
 engine = Sam3Engine()
 
