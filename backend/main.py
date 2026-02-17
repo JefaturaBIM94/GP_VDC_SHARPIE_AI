@@ -28,7 +28,15 @@ from backend.ocr_routes import router as ocr_router
 
 app.include_router(ocr_router)
 
+# backend/main.py
+from fastapi import FastAPI
+from .video_routes import router as video_router
 
+app = FastAPI()
+
+app.include_router(video_router)
+
+# ... tus otros routers ...
 
 # Configurar CORS para desarrollo local con frontend en otro puerto 
 origins = [

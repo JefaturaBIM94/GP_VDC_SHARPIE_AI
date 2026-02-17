@@ -1,425 +1,272 @@
-import React, { useMemo, useRef, useState } from "react";
-import { segmentImage } from "../api";
-import type { SegmentResponse, InstanceLabel } from "../api";
-import { VideoSegPlayer } from "../components/VideoSegPlayer";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { SegmentResponse } from "../api";
+import { processVideo, segmentVideoFrame, videoFrameUrl } from "../api";
+import { VideoSegPlayer } from "../components/VideoSegPlayer"; // ya lo tienes en tu repo
 
-type FrameSample = {
-  t: number;
-  file: File;
-  dataUrl: string;
+type VideoSessionState = {
+  sessionId: string;
+  fps: number;
+  frameCount: number;
+  duration: number;
+  w: number;
+  h: number;
 };
 
-function blobToFile(blob: Blob, fileName: string): File {
-  return new File([blob], fileName, { type: blob.type || "image/png" });
-}
-
-async function captureFrameAsPng(videoEl: HTMLVideoElement): Promise<{ file: File; dataUrl: string }> {
-  const w = videoEl.videoWidth;
-  const h = videoEl.videoHeight;
-  if (!w || !h) throw new Error("El video aún no tiene dimensiones (videoWidth/videoHeight = 0).");
-
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("No se pudo obtener contexto 2D de canvas.");
-  ctx.drawImage(videoEl, 0, 0, w, h);
-
-  const dataUrl = canvas.toDataURL("image/png");
-
-  const blob: Blob = await new Promise((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob devolvió null"))), "image/png");
-  });
-
-  return { file: blobToFile(blob, `frame_${Date.now()}.png`), dataUrl };
-}
-
-function waitSeek(video: HTMLVideoElement, t: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onSeeked = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = () => {
-      cleanup();
-      reject(new Error("Error haciendo seek en el video."));
-    };
-    const cleanup = () => {
-      video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("error", onError);
-    };
-    video.addEventListener("seeked", onSeeked, { once: true });
-    video.addEventListener("error", onError, { once: true });
-    video.currentTime = t;
-  });
-}
-
-async function cropAtPoint(dataUrl: string, cx: number, cy: number, size = 96): Promise<string> {
-  const img = new Image();
-  img.src = dataUrl;
-
-  await new Promise<void>((resolve) => {
-    img.onload = () => resolve();
-    img.onerror = () => resolve(); // fallback: si falla, regresamos vacío luego
-  });
-
-  if (!img.naturalWidth || !img.naturalHeight) return "";
-
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-
-  const x = Math.round(cx * img.naturalWidth);
-  const y = Math.round(cy * img.naturalHeight);
-
-  const half = Math.floor(size / 2);
-  const sx = Math.max(0, Math.min(img.naturalWidth - size, x - half));
-  const sy = Math.max(0, Math.min(img.naturalHeight - size, y - half));
-
-  ctx.drawImage(img, sx, sy, size, size, 0, 0, size, size);
-  return canvas.toDataURL("image/png");
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
 }
 
 export default function VideoTrackerView() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [videoFile, setVideoFile] = useState<File | null>(null);
-  const videoUrl = useMemo(() => (videoFile ? URL.createObjectURL(videoFile) : ""), [videoFile]);
+  const localVideoUrl = useMemo(() => (videoFile ? URL.createObjectURL(videoFile) : ""), [videoFile]);
 
-  const [prompt, setPrompt] = useState("");
-  const [threshold, setThreshold] = useState<number>(0.35);
+  const [session, setSession] = useState<VideoSessionState | null>(null);
+  const [status, setStatus] = useState<"idle" | "processing" | "ready" | "searching" | "error">("idle");
+  const [statusMsg, setStatusMsg] = useState<string>("");
 
-  const [stage, setStage] = useState<"idle" | "preprocessing" | "ready" | "searching">("idle");
-  const [progress, setProgress] = useState<{ label: string; p: number }>({ label: "", p: 0 });
+  const [prompt, setPrompt] = useState("MACHINERY");
+  const [threshold, setThreshold] = useState(0.5);
 
-  const [samples, setSamples] = useState<FrameSample[]>([]);
-  const [results, setResults] = useState<Array<{ t: number; seg: SegmentResponse }>>([]);
+  const [seg, setSeg] = useState<SegmentResponse | null>(null);
+  const [hoverId, setHoverId] = useState<number | null>(null);
 
-  const [playing, setPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  // Para “Search entire video” (demo): samplea cada N frames
+  const [searchProgress, setSearchProgress] = useState<{ i: number; total: number } | null>(null);
 
-  const [error, setError] = useState("");
+  // Throttle de requests en playback
+  const lastReqRef = useRef<number>(0);
+  const lastFrameRef = useRef<number>(-1);
 
-  const onPickVideo = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setError("");
-    setStage("idle");
-    setProgress({ label: "", p: 0 });
-    setSamples([]);
-    setResults([]);
-    setPlaying(false);
-
+  const onPickVideo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0] ?? null;
     setVideoFile(f);
-  };
+    setSeg(null);
+    setHoverId(null);
+    setSession(null);
+    setSearchProgress(null);
 
-  const onPreprocess = async () => {
-    setError("");
-    const v = videoRef.current;
-    if (!v || !videoFile) return;
+    if (!f) return;
 
     try {
-      setStage("preprocessing");
-      setPlaying(false);
-      v.pause();
-
-      // espera metadata
-      if (!v.duration || Number.isNaN(v.duration)) {
-        await new Promise<void>((resolve) => {
-          const onMeta = () => resolve();
-          v.addEventListener("loadedmetadata", onMeta, { once: true });
-        });
-      }
-
-      const duration = v.duration;
-      const N = 18; // thumbnails para timeline
-      const times = Array.from({ length: N }, (_, i) => (duration * i) / Math.max(1, N - 1));
-
-      const out: FrameSample[] = [];
-      for (let i = 0; i < times.length; i++) {
-        setProgress({ label: "Preprocessing video...", p: (i / times.length) * 100 });
-        await waitSeek(v, times[i]);
-        const cap = await captureFrameAsPng(v);
-        out.push({ t: times[i], ...cap });
-      }
-
-      setSamples(out);
-      setProgress({ label: "Preprocess listo", p: 100 });
-      setStage("ready");
+      setStatus("processing");
+      setStatusMsg("Processing video (extracting frames)...");
+      const info = await processVideo(f);
+      setSession({
+        sessionId: info.session_id,
+        fps: info.fps,
+        frameCount: info.frame_count,
+        duration: info.duration_s,
+        w: info.width,
+        h: info.height,
+      });
+      setStatus("ready");
+      setStatusMsg("Video processed. Ready.");
     } catch (err: any) {
-      setError(err?.message ?? "Error en preprocess.");
-      setStage("idle");
+      setStatus("error");
+      setStatusMsg(err?.message ?? "Error procesando video.");
     }
+  };
+
+  const runFrameSeg = async (frameIdx: number) => {
+    if (!session) return;
+    if (!prompt.trim()) return;
+
+    const s = await segmentVideoFrame(session.sessionId, frameIdx, prompt.trim(), threshold);
+    setSeg(s);
   };
 
   const onSearchEntireVideo = async () => {
-    setError("");
-    const v = videoRef.current;
-    if (!v || !samples.length) return;
+    if (!session) return;
+    if (!prompt.trim()) return;
+
+    setStatus("searching");
+    setStatusMsg("Searching entire video...");
+
+    // sample cada 8 frames (ajusta: 1 = todo, 4 = más fino)
+    const stride = 8;
+    const total = Math.ceil(session.frameCount / stride);
+    setSearchProgress({ i: 0, total });
 
     try {
-      setStage("searching");
-      setPlaying(false);
-      v.pause();
+      for (let k = 0, idx = 0; idx < session.frameCount; k++, idx += stride) {
+        setSearchProgress({ i: k + 1, total });
+        await runFrameSeg(idx);
 
-      const out: Array<{ t: number; seg: SegmentResponse }> = [];
-      for (let i = 0; i < samples.length; i++) {
-        setProgress({ label: `Searching entire video... (${i + 1}/${samples.length})`, p: ((i + 1) / samples.length) * 100 });
-
-        // usamos el frame sample ya capturado
-        const seg = await segmentImage(samples[i].file, prompt, threshold);
-        out.push({ t: samples[i].t, seg });
+        // opcional: saltar el player al frame
+        const v = videoRef.current;
+        if (v) v.currentTime = idx / session.fps;
       }
 
-      setResults(out);
-      setStage("ready");
-      setPlaying(true); // auto-play con overlays, estilo Meta
+      setStatus("ready");
+      setStatusMsg("Search completed.");
     } catch (err: any) {
-      setError(err?.message ?? "Error buscando en el video.");
-      setStage("ready");
+      setStatus("error");
+      setStatusMsg(err?.message ?? "Error en search.");
+    } finally {
+      setSearchProgress(null);
     }
   };
 
-  // Panel de analytics: toma resultado más cercano al tiempo actual y construye lista
-  const closestSeg = useMemo(() => {
-    if (!results.length) return null;
-    let best = results[0];
-    let d = Math.abs(results[0].t - currentTime);
-    for (let i = 1; i < results.length; i++) {
-      const nd = Math.abs(results[i].t - currentTime);
-      if (nd < d) {
-        best = results[i];
-        d = nd;
-      }
+  // Playback real: cada ~300ms dispara segmentación del frame actual
+  const onTimeUpdate = async () => {
+    const v = videoRef.current;
+    if (!v || !session) return;
+    if (status !== "ready") return;
+    if (!prompt.trim()) return;
+
+    const now = Date.now();
+    if (now - lastReqRef.current < 300) return;
+
+    const frameIdx = clamp(Math.floor(v.currentTime * session.fps), 0, session.frameCount - 1);
+    if (frameIdx === lastFrameRef.current) return;
+
+    lastReqRef.current = now;
+    lastFrameRef.current = frameIdx;
+
+    try {
+      await runFrameSeg(frameIdx);
+    } catch {
+      // no rompas playback por un frame fallido
     }
-    return best;
-  }, [results, currentTime]);
+  };
 
-  const closestFrame = useMemo(() => {
-    if (!samples.length) return null;
-    let best = samples[0];
-    let d = Math.abs(samples[0].t - currentTime);
-    for (let i = 1; i < samples.length; i++) {
-      const nd = Math.abs(samples[i].t - currentTime);
-      if (nd < d) {
-        best = samples[i];
-        d = nd;
-      }
-    }
-    return best;
-  }, [samples, currentTime]);
-
-  const analytics = useMemo(() => {
-    const seg = closestSeg?.seg;
-    if (!seg) return { total: 0, byClass: [] as Array<{ k: string; n: number }>, labels: [] as InstanceLabel[] };
-    const labels = seg.labels ?? [];
-    const map = new Map<string, number>();
-    labels.forEach((l) => map.set(l.class_name, (map.get(l.class_name) ?? 0) + 1));
-    const byClass = Array.from(map.entries())
-      .map(([k, n]) => ({ k, n }))
-      .sort((a, b) => b.n - a.n);
-    return { total: labels.length, byClass, labels };
-  }, [closestSeg]);
-
-  const isBusy = stage === "preprocessing" || stage === "searching";
+  // UI
+  const isReady = status === "ready";
+  const canSearch = isReady && !!session && !!prompt.trim();
 
   return (
     <div className="page">
-      {/* CONTROLS */}
       <div className="toolbar">
         <div className="toolbarRow">
-          <input type="file" accept="video/*" onChange={onPickVideo} />
+          <input className="fileInput" type="file" accept="video/*" onChange={onPickVideo} />
 
-          <button className="btn" onClick={onPreprocess} disabled={!videoFile || isBusy}>
-            {stage === "preprocessing" ? "Procesando..." : "Process video"}
-          </button>
+          <div className="field">
+            <div className="label">Process video</div>
+            <div className="hint">{status === "processing" ? "Processing..." : statusMsg}</div>
+          </div>
 
-          <label className="field">
-            <span>Prompt</span>
+          <div className="field">
+            <div className="label">Prompt</div>
             <input
+              className="input"
               value={prompt}
+              disabled={!isReady}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Ej: cars, rebar, column..."
-              disabled={stage !== "ready"}
+              placeholder="e.g. machinery, column, rebar..."
             />
-          </label>
+          </div>
 
-          <label className="field" style={{ maxWidth: 140 }}>
-            <span>Threshold</span>
+          <div className="field small">
+            <div className="label">Threshold</div>
             <input
+              className="input"
               type="number"
-              step="0.01"
+              step="0.05"
               min="0"
               max="1"
+              disabled={!isReady}
               value={threshold}
               onChange={(e) => setThreshold(Number(e.target.value))}
-              disabled={stage !== "ready"}
             />
-          </label>
+          </div>
 
-          <button className="btnRun" onClick={onSearchEntireVideo} disabled={stage !== "ready" || !prompt.trim() || isBusy || !samples.length}>
+          <button className="btnRun" disabled={!canSearch} onClick={onSearchEntireVideo}>
             Search entire video
           </button>
 
-          <button className="btn" onClick={() => setPlaying((p) => !p)} disabled={!results.length || isBusy}>
-            {playing ? "Pause" : "Play"}
+          <div className="spacer" />
+
+          <button
+            className="btnGhost"
+            disabled={!isReady || !videoRef.current}
+            onClick={() => videoRef.current?.play()}
+          >
+            Play
           </button>
         </div>
 
-        {isBusy && (
+        {status === "searching" && searchProgress && (
           <div className="progressRow">
-            <div className="progressLabel">{progress.label}</div>
+            <div className="progressText">
+              Searching entire video... ({searchProgress.i}/{searchProgress.total})
+            </div>
             <div className="progressBar">
-              <div className="progressFill" style={{ width: `${progress.p}%` }} />
+              <div
+                className="progressFill"
+                style={{ width: `${Math.round((searchProgress.i / searchProgress.total) * 100)}%` }}
+              />
             </div>
           </div>
         )}
-
-        {error && <div className="error">{error}</div>}
       </div>
 
-      {/* LAYOUT: video + analytics */}
       <div className="grid2">
+        {/* VIDEO + OVERLAY */}
         <div className="card">
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>Video preview</div>
+          <div className="cardTitle">Video preview</div>
 
-          {/* VIDEO ELEMENT (hidden control) para preprocess (seek/capture) */}
-          {videoFile && (
-            <>
-              <video
-                ref={videoRef}
-                src={videoUrl}
-                controls
-                style={{
-                  width: "100%",
-                  maxHeight: 420,
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  marginBottom: 10,
-                  background: "#000",
-                }}
-              />
-
-              {/* PLAYER con overlays (se muestra cuando ya hay resultados) */}
-              {results.length > 0 && (
-                <VideoSegPlayer
-                  videoUrl={videoUrl}
-                  results={results}
-                  playing={playing}
-                  onTime={(t) => setCurrentTime(t)}
-                  opacity={0.48} // fill opacity 45-50%
-                />
-              )}
-            </>
-          )}
-
-          {/* TIMELINE */}
-          {samples.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ opacity: 0.85, fontSize: 12, marginBottom: 8 }}>Timeline (thumbnails)</div>
-              <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 6 }}>
-                {samples.map((s) => (
-                  <button
-                    key={s.t}
-                    className="thumb"
-                    onClick={async () => {
-                      const v = videoRef.current;
-                      if (!v) return;
-                      setPlaying(false);
-                      v.pause();
-                      await waitSeek(v, s.t);
-                      setCurrentTime(s.t);
-                    }}
-                    title={`${s.t.toFixed(2)}s`}
-                  >
-                    <img src={s.dataUrl} style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8 }} />
-                    <div style={{ fontSize: 11, opacity: 0.75 }}>{s.t.toFixed(1)}s</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+          <div className="videoStage">
+            {/* VideoSegPlayer dibuja overlay (fill + outline) encima */}
+            <VideoSegPlayer
+              videoRef={videoRef}
+              src={localVideoUrl}
+              segmentData={seg}
+              hoverId={hoverId ?? undefined}
+              onHoverId={(id) => setHoverId(id)}
+              onTimeUpdate={onTimeUpdate}
+            />
+          </div>
         </div>
 
-        {/* ANALYTICS PANEL */}
+        {/* ANALYTICS */}
         <div className="card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-            <div style={{ fontWeight: 800 }}>Analytics</div>
-            <div style={{ opacity: 0.75, fontSize: 12 }}>t = {currentTime.toFixed(2)}s</div>
-          </div>
+          <div className="cardTitle">Analytics</div>
 
-          <div style={{ marginTop: 10, opacity: 0.85, fontSize: 12 }}>
-            Instances: <b>{analytics.total}</b>
-          </div>
-
-          <div style={{ marginTop: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6, opacity: 0.9 }}>Classes</div>
-            <div style={{ display: "grid", gap: 6 }}>
-              {analytics.byClass.map((c) => (
-                <div key={c.k} className="pillRow">
-                  <span className="pillKey">{c.k}</span>
-                  <span className="pillVal">{c.n}</span>
-                </div>
-              ))}
-              {!analytics.byClass.length && <div style={{ opacity: 0.6 }}>Sin resultados aún.</div>}
+          <div className="analyticsBlock">
+            <div className="kv">
+              <span>Instances</span>
+              <span>{(seg as any)?.labels?.length ?? 0}</span>
             </div>
-          </div>
 
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6, opacity: 0.9 }}>Instances (preview)</div>
+            <div className="sectionTitle">Classes</div>
 
-            <div style={{ display: "grid", gap: 10, maxHeight: 420, overflow: "auto", paddingRight: 6 }}>
-              {analytics.labels.slice(0, 30).map((l) => (
-                <div key={l.id} className="instanceRow">
-                  <div
-                    className="colorDot"
-                    style={{ background: l.color }}
-                    title={l.color}
-                  />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ fontWeight: 700 }}>{l.class_name}</div>
-                      <div style={{ opacity: 0.75, fontSize: 12 }}>score {l.score.toFixed(2)}</div>
-                    </div>
-                    <div style={{ opacity: 0.75, fontSize: 12 }}>
-                      id {l.id} · area {Math.round(l.area_px)} px²
-                    </div>
-                  </div>
+            {(seg as any)?.labels?.length ? (
+              <div className="list">
+                {(seg as any).labels.map((lab: string, i: number) => {
+                  const score = (seg as any)?.scores?.[i];
+                  // color demo: si tu SegmentResponse ya trae colors, úsalo
+                  const color = (seg as any)?.colors?.[i] ?? `hsl(${(i * 47) % 360} 80% 55%)`;
 
-                  {/* mini-crop alrededor de centroid (cx/cy) usando el frame más cercano */}
-                  <MiniCrop frameUrl={closestFrame?.dataUrl ?? ""} cx={l.cx} cy={l.cy} />
-                </div>
-              ))}
-            </div>
+                  return (
+                    <button
+                      key={`${lab}-${i}`}
+                      className="rowBtn"
+                      onMouseEnter={() => setHoverId(i)}
+                      onMouseLeave={() => setHoverId(null)}
+                    >
+                      <span className="swatch" style={{ background: color }} />
+                      <span className="rowMain">{lab}</span>
+                      <span className="rowMeta">{typeof score === "number" ? score.toFixed(3) : ""}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="hint">Sin resultados aún.</div>
+            )}
           </div>
         </div>
       </div>
-    </div>
-  );
-}
 
-function MiniCrop({ frameUrl, cx, cy }: { frameUrl: string; cx: number; cy: number }) {
-  const [src, setSrc] = useState<string>("");
-
-  React.useEffect(() => {
-    let alive = true;
-    if (!frameUrl) {
-      setSrc("");
-      return;
-    }
-    cropAtPoint(frameUrl, cx, cy, 84).then((out) => {
-      if (alive) setSrc(out);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [frameUrl, cx, cy]);
-
-  return (
-    <div style={{ width: 84, height: 84, borderRadius: 10, overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.03)" }}>
-      {src ? <img src={src} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : null}
+      {/* Timeline (placeholder): para MVP solo muestra una fila vacía o mini thumbs si las agregas después */}
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="cardTitle">Timeline (thumbnails)</div>
+        <div className="hint">
+          (Siguiente iteración) Generar thumbs en backend y pintarlos aquí como en Meta.
+        </div>
+      </div>
     </div>
   );
 }

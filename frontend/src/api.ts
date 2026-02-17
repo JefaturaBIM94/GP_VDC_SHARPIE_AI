@@ -27,6 +27,15 @@ export type SegmentResponse = {
   labels: InstanceLabel[];
 };
 
+export type VideoProcessResponse = {
+  session_id: string;
+  fps: number;
+  frame_count: number;
+  width: number;
+  height: number;
+  duration_s: number;
+};
+
 export type OcrDetection = {
   text: string;
   clean: string;
@@ -159,4 +168,41 @@ export async function reconstructFast(file: File, opts: FastReconRequest): Promi
   }
 
   return (await res.json()) as FastReconResponse;
+}
+
+// -------------------- Video --------------------
+export function videoFrameUrl(sessionId: string, frameIdx: number) {
+  return `${API_BASE}/video/frame/${sessionId}/${frameIdx}`;
+}
+
+export async function processVideo(file: File): Promise<VideoProcessResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+
+  const res = await fetch(`${API_BASE}/video/process`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`processVideo failed: ${res.status} ${txt}`);
+  }
+  return (await res.json()) as VideoProcessResponse;
+}
+
+export async function segmentVideoFrame(
+  sessionId: string,
+  frameIdx: number,
+  prompt: string,
+  threshold: number
+): Promise<SegmentResponse> {
+  const res = await fetch(`${API_BASE}/video/segment_frame`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, frame_idx: frameIdx, prompt, threshold }),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`segmentVideoFrame failed: ${res.status} ${txt}`);
+  }
+
+  return (await res.json()) as SegmentResponse;
 }
