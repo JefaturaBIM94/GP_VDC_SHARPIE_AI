@@ -20,7 +20,7 @@ export default function VideoTrackerView() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [videoFile, setVideoFile] = useState<File | null>(null);
-  const localVideoUrl = useMemo(() => (videoFile ? URL.createObjectURL(videoFile) : ""), [videoFile]);
+  const localVideoUrl = useMemo(() => (videoFile ? URL.createObjectURL(videoFile) : null), [videoFile]);
 
   const [session, setSession] = useState<VideoSessionState | null>(null);
   const [status, setStatus] = useState<"idle" | "processing" | "ready" | "searching" | "error">("idle");

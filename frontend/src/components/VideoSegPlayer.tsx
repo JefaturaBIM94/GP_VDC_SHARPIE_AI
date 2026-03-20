@@ -3,8 +3,8 @@ import React, { useEffect, useRef } from "react";
 import type { SegmentResponse } from "../api";
 
 type Props = {
-  videoRef: React.RefObject<HTMLVideoElement>;
-  src: string;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  src: string | null;
   segmentData: SegmentResponse | null;
   hoverId?: number;
   onHoverId?: (id: number | null) => void;
@@ -13,6 +13,11 @@ type Props = {
 
 export function VideoSegPlayer({ videoRef, src, segmentData, hoverId, onHoverId, onTimeUpdate }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Si no hay fuente, no renderizamos el player para evitar src=""
+  if (!src) {
+    return null;
+  }
 
   // Render overlay (fill + outline) desde segmentData.overlay_image_b64 o id_map_rgb_b64
   useEffect(() => {
@@ -61,7 +66,7 @@ export function VideoSegPlayer({ videoRef, src, segmentData, hoverId, onHoverId,
     <div style={{ position: "relative", width: "100%" }}>
       <video
         ref={videoRef}
-        src={src}
+        src={src ?? undefined}
         controls
         onTimeUpdate={onTimeUpdate}
         style={{ width: "100%", borderRadius: 12, border: "1px solid rgba(255,255,255,0.08)" }}

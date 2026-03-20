@@ -15,14 +15,14 @@ from .video_store import VideoSessionStore
 # IMPORTANTE:
 # Ajusta estos imports a tu estructura real. La idea es reutilizar EXACTAMENTE
 # la misma función/engine que ya usas en /segment_image.
-from .sam3_engine import SAM3Engine  # o donde tengas tu engine real
+from .sam3_engine import Sam3Engine  # o donde tengas tu engine real
 
 
 router = APIRouter(prefix="/video", tags=["video"])
 store = VideoSessionStore()
 
 # Inicializa el engine una vez (MVP)
-sam_engine = SAM3Engine(device="cuda")  # o "cpu" / autodetect
+sam_engine = Sam3Engine()  # autodetect: cuda si está disponible, si no cpu
 
 
 class VideoProcessResponse(BaseModel):
